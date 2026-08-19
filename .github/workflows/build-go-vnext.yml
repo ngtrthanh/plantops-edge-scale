@@ -1,0 +1,60 @@
+name: Build Go Edge vNext
+
+on:
+  push:
+    branches: [go-vnext]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.23.x'
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build single Windows binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $sha = "${{ github.sha }}"
+          go build -trimpath -ldflags "-s -w -X main.version=0.1.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
+      - name: Runtime smoke
+        shell: pwsh
+        run: |
+          $p = Start-Process .\out\plantops-edge-scale.exe -PassThru
+          try {
+            $ok = $false
+            for ($i=0; $i -lt 30; $i++) {
+              try {
+                $h = Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 1
+                if ($h.status -eq 'ok') { $ok = $true; break }
+              } catch { Start-Sleep -Milliseconds 300 }
+            }
+            if (-not $ok) { throw "healthz failed" }
+            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
+            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
+            $id = Invoke-RestMethod http://127.0.0.1:8080/api/identity
+            if ($id.rfid.tag -ne 'RFID-DEMO-001') { throw "rfid ingress failed" }
+            if ($id.lpr.plate -ne '15C-123.45') { throw "lpr ingress failed" }
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+      - name: Hash
+        shell: pwsh
+        run: |
+          (Get-FileHash out/plantops-edge-scale.exe -Algorithm SHA256).Hash.ToLower() | Set-Content out/plantops-edge-scale.exe.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plantops-edge-scale-go-${{ github.sha }}
+          path: |
+            out/plantops-edge-scale.exe
+            out/plantops-edge-scale.exe.sha256
