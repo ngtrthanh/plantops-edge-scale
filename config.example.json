@@ -1,0 +1,48 @@
+{
+  "station_id": "WHD-NC",
+  "listen": "127.0.0.1:8080",
+  "scale": {
+    "adapter": "scaleascii",
+    "addr": "192.168.10.20:4001",
+    "timeout_ms": 2000,
+    "protocol": "REPLACE_WITH_REAL_CONTROLLER_PROTOCOL"
+  },
+  "remote_io": {
+    "adapter": "modbustcp",
+    "addr": "192.168.10.30:502",
+    "unit_id": 1,
+    "mapping": {
+      "entry_present": 0,
+      "front_present": 1,
+      "rear_present": 2,
+      "exit_present": 3,
+      "entry_barrier_open_feedback": 4,
+      "entry_barrier_closed_feedback": 5,
+      "exit_barrier_open_feedback": 6,
+      "exit_barrier_closed_feedback": 7,
+      "safety_clear": 8,
+      "entry_green": 0,
+      "exit_green": 1,
+      "buzzer": 2,
+      "entry_barrier_open_command": 3,
+      "exit_barrier_open_command": 4
+    }
+  },
+  "rfid": {
+    "adapter": "webhook",
+    "ingress": "/io/rfid"
+  },
+  "lpr": {
+    "adapter": "webhook",
+    "ingress": "/io/lpr"
+  },
+  "storage": {
+    "target_driver": "sqlite",
+    "path": "data/edge.db"
+  },
+  "central": {
+    "enabled": false,
+    "base_url": "https://central.example.invalid",
+    "sync_interval_seconds": 10
+  }
+}
