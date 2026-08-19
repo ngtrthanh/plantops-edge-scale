@@ -40,6 +40,40 @@ jobs:
             throw "PlantOps.Edge.Scale.exe not found"
           }
 
+      - name: Smoke test Kestrel + demo cycle
+        shell: pwsh
+        run: |
+          $proc = Start-Process ".\out\publish\PlantOps.Edge.Scale.exe" -PassThru
+          try {
+            $healthy = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              try {
+                $health = Invoke-RestMethod "http://127.0.0.1:8080/healthz" -TimeoutSec 2
+                if ($health.status -eq "ok") {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $healthy) { throw "Kestrel /healthz did not become healthy" }
+
+            $state = Invoke-RestMethod "http://127.0.0.1:8080/api/state"
+            if (-not $state.phase) { throw "State API failed" }
+
+            Invoke-RestMethod "http://127.0.0.1:8080/api/demo/run" -Method Post | Out-Null
+            Start-Sleep -Seconds 8
+
+            $tickets = @(Invoke-RestMethod "http://127.0.0.1:8080/api/tickets")
+            if ($tickets.Count -lt 1) { throw "Demo cycle did not write a ticket" }
+          }
+          finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force
+            }
+          }
+
       - name: Package immutable artifact
         shell: pwsh
         run: |
