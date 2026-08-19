@@ -1,0 +1,59 @@
+name: Build native Windows Edge
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.302"
+
+      - name: Show SDK
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release --no-restore
+
+      - name: Publish self-contained win-x64
+        run: dotnet publish -c Release -r win-x64 --self-contained true --no-restore -o out/publish
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .\out\publish\PlantOps.Edge.Scale.exe)) {
+            throw "PlantOps.Edge.Scale.exe not found"
+          }
+
+      - name: Package immutable artifact
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}"
+          $zip = ".\out\plantops-edge-scale-win-x64-sha-$sha.zip"
+          Compress-Archive -Path .\out\publish\* -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  plantops-edge-scale-win-x64-sha-$sha.zip" | Set-Content ".\out\plantops-edge-scale-win-x64-sha-$sha.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: plantops-edge-scale-${{ github.sha }}
+          path: |
+            out/plantops-edge-scale-win-x64-sha-${{ github.sha }}.zip
+            out/plantops-edge-scale-win-x64-sha-${{ github.sha }}.zip.sha256
+          if-no-files-found: error
