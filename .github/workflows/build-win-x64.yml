@@ -33,22 +33,41 @@ jobs:
       - name: Publish self-contained win-x64
         run: dotnet publish -c Release -r win-x64 --self-contained true -o out/publish
 
-      - name: Verify executable
+      - name: Verify executable and animated UI files
         shell: pwsh
         run: |
           if (-not (Test-Path .\out\publish\PlantOps.Edge.Scale.exe)) {
             throw "PlantOps.Edge.Scale.exe not found"
           }
 
-      - name: Smoke test Kestrel + demo cycle
+          $index = ".\out\publish\wwwroot\index.html"
+          if (-not (Test-Path $index)) {
+            throw "wwwroot/index.html not found"
+          }
+
+          $html = Get-Content $index -Raw
+          if ($html -notmatch "Hardware Workflow Demo") {
+            throw "Animated hardware UI marker not found"
+          }
+          if ($html -notmatch "/api/events") {
+            throw "Animated UI does not call /api/events"
+          }
+          if ($html -notmatch "/api/reset") {
+            throw "Animated UI does not call /api/reset"
+          }
+
+      - name: Smoke test Kestrel + animated hardware API flow
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $base = "http://127.0.0.1:8080"
           $proc = Start-Process ".\out\publish\PlantOps.Edge.Scale.exe" -PassThru
+
           try {
             $healthy = $false
-            for ($i = 0; $i -lt 30; $i++) {
+            for ($i = 0; $i -lt 40; $i++) {
               try {
-                $health = Invoke-RestMethod "http://127.0.0.1:8080/healthz" -TimeoutSec 2
+                $health = Invoke-RestMethod "$base/healthz" -TimeoutSec 2
                 if ($health.status -eq "ok") {
                   $healthy = $true
                   break
@@ -59,14 +78,68 @@ jobs:
             }
             if (-not $healthy) { throw "Kestrel /healthz did not become healthy" }
 
-            $state = Invoke-RestMethod "http://127.0.0.1:8080/api/state"
+            # Verify the animated web UI is actually being served by this executable.
+            $page = Invoke-WebRequest "$base/" -UseBasicParsing
+            if ($page.StatusCode -ne 200) { throw "GET / failed" }
+            if ($page.Content -notmatch "Hardware Workflow Demo") {
+              throw "Running executable is not serving the animated hardware UI"
+            }
+
+            # Verify APIs required by the animated page exist and return JSON.
+            $state = Invoke-RestMethod "$base/api/state"
             if (-not $state.phase) { throw "State API failed" }
 
-            Invoke-RestMethod "http://127.0.0.1:8080/api/demo/run" -Method Post | Out-Null
-            Start-Sleep -Seconds 8
+            $eventsBefore = @(Invoke-RestMethod "$base/api/events")
+            $ticketsBefore = @(Invoke-RestMethod "$base/api/tickets")
 
-            $tickets = @(Invoke-RestMethod "http://127.0.0.1:8080/api/tickets")
-            if ($tickets.Count -lt 1) { throw "Demo cycle did not write a ticket" }
+            # Reset must be a real endpoint, not SPA fallback HTML.
+            $reset = Invoke-RestMethod "$base/api/reset" -Method Post
+            if ($reset.status -ne "reset") { throw "Reset API failed" }
+
+            # Start a full simulated truck cycle.
+            $run = Invoke-RestMethod "$base/api/demo/run" -Method Post
+            if ($run.status -ne "started") { throw "Demo run API failed" }
+
+            # Observe live intermediate state so we know the cycle actually moves.
+            Start-Sleep -Seconds 2
+            $mid = Invoke-RestMethod "$base/api/state"
+            if (-not $mid.running) { throw "Demo cycle is not running after start" }
+            if (-not $mid.rfid) { throw "RFID stage did not occur" }
+
+            # Wait for completion with a bounded timeout.
+            $completed = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 500
+              $state = Invoke-RestMethod "$base/api/state"
+              if (-not $state.running -and $state.phase -eq "COMPLETE") {
+                $completed = $true
+                break
+              }
+            }
+            if (-not $completed) { throw "Demo truck cycle did not complete" }
+
+            $eventsAfter = @(Invoke-RestMethod "$base/api/events")
+            $ticketsAfter = @(Invoke-RestMethod "$base/api/tickets")
+
+            if ($eventsAfter.Count -le $eventsBefore.Count) {
+              throw "Event stream did not grow during demo cycle"
+            }
+            if ($ticketsAfter.Count -le $ticketsBefore.Count) {
+              throw "Demo cycle did not write a new ticket"
+            }
+
+            $latest = $ticketsAfter | Select-Object -First 1
+            if ($latest.plate -ne "15C-123.45") { throw "Plate capture/OCR result missing from ticket" }
+            if ($latest.rfid -ne "RFID-DEMO-001") { throw "RFID result missing from ticket" }
+            if ([int]$latest.weightKg -ne 28460) { throw "Stable weight missing from ticket" }
+
+            Write-Host "Animated hardware runtime smoke test PASS"
+            Write-Host "Phase: $($state.phase)"
+            Write-Host "Ticket: $($latest.ticketId)"
+            Write-Host "Plate: $($latest.plate)"
+            Write-Host "RFID: $($latest.rfid)"
+            Write-Host "Weight: $($latest.weightKg) kg"
+            Write-Host "Events: $($eventsAfter.Count)"
           }
           finally {
             if ($proc -and -not $proc.HasExited) {
