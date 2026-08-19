@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>PlantOps Edge Scale Demo</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#eef1f4;color:#171b20;margin:0}
+    main{max-width:980px;margin:auto;padding:28px}header{display:flex;justify-content:space-between;gap:20px;align-items:center}
+    h1{margin:0 0 6px}p{color:#66717b}button{padding:11px 16px;border:0;border-radius:8px;background:#171b20;color:white;font-weight:700;cursor:pointer}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:18px}.card{background:white;border:1px solid #d8dde2;border-radius:12px;padding:16px}
+    .big{font-size:28px;font-weight:750}.muted{color:#6f7982;font-size:12px}.rows{display:grid;gap:7px}.row{display:flex;justify-content:space-between;border-bottom:1px solid #edf0f2;padding:6px 0}.on{color:#167044;font-weight:700}
+    pre{background:#15191e;color:#e8ecef;padding:14px;border-radius:10px;overflow:auto;min-height:90px}
+    @media(max-width:760px){.grid{grid-template-columns:1fr}header{display:block}button{margin-top:10px}}
+  </style>
+</head>
+<body>
+<main>
+<header>
+  <div><h1>PlantOps Edge Scale</h1><p>Kestrel + Windows Service demo: scale, RFID, plate, sensors, lights, buzzer, barriers, ticket.</p></div>
+  <button id="run">Run truck cycle</button>
+</header>
+<section class="grid">
+  <div class="card"><div class="muted">PHASE</div><div class="big" id="phase">--</div></div>
+  <div class="card"><div class="muted">WEIGHT</div><div class="big"><span id="weight">0</span> kg</div><div id="stable"></div></div>
+  <div class="card"><div class="muted">IDENTITY</div><div class="big" id="plate">--</div><div id="rfid" class="muted">--</div></div>
+</section>
+<section class="grid">
+  <div class="card"><h3>Position sensors</h3><div id="sensors" class="rows"></div></div>
+  <div class="card"><h3>Traffic control</h3><div id="control" class="rows"></div></div>
+  <div class="card"><h3>Tickets</h3><pre id="tickets">No ticket yet.</pre></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const row=(k,v,on=false)=>`<div class="row"><span>${k}</span><b class="${on?'on':''}">${v}</b></div>`;
+async function refresh(){
+ const [s,t]=await Promise.all([fetch('/api/state').then(r=>r.json()),fetch('/api/tickets').then(r=>r.json())]);
+ $('phase').textContent=s.phase;$('weight').textContent=Number(s.weightKg).toLocaleString();$('stable').textContent=s.weightStable?'STABLE':'UNSTABLE';$('stable').className=s.weightStable?'on':'';
+ $('plate').textContent=s.plate||'--';$('rfid').textContent=s.rfid||'--';
+ $('sensors').innerHTML=row('ENTRY',s.sensorEntry?'ON':'OFF',s.sensorEntry)+row('FRONT',s.sensorFront?'ON':'OFF',s.sensorFront)+row('REAR',s.sensorRear?'ON':'OFF',s.sensorRear)+row('EXIT',s.sensorExit?'ON':'OFF',s.sensorExit);
+ $('control').innerHTML=row('ENTRY LIGHT',s.entryLight,s.entryLight==='GREEN')+row('EXIT LIGHT',s.exitLight,s.exitLight==='GREEN')+row('BUZZER',s.buzzer?'ON':'OFF',s.buzzer)+row('ENTRY BARRIER',s.entryBarrier,s.entryBarrier==='OPEN')+row('EXIT BARRIER',s.exitBarrier,s.exitBarrier==='OPEN');
+ $('tickets').textContent=t.length?JSON.stringify(t,null,2):'No ticket yet.';$('run').disabled=s.running;
+}
+$('run').onclick=async()=>{await fetch('/api/demo/run',{method:'POST'});refresh()};refresh();setInterval(refresh,400);
+</script>
+</body>
+</html>
