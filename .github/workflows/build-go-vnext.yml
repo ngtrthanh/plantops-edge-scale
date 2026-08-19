@@ -2,7 +2,7 @@ name: Build Go Edge vNext
 
 on:
   push:
-    branches: [go-vnext]
+    branches: [main, go-vnext]
   pull_request:
 
 permissions:
@@ -15,7 +15,9 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.x'
+      - name: Show Go
+        run: go version
       - name: Test
         run: go test ./...
       - name: Vet
