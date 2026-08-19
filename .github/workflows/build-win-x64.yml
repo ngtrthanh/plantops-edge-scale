@@ -36,6 +36,8 @@ jobs:
       - name: Verify executable and animated UI files
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           if (-not (Test-Path .\out\publish\PlantOps.Edge.Scale.exe)) {
             throw "PlantOps.Edge.Scale.exe not found"
           }
@@ -54,6 +56,18 @@ jobs:
           }
           if ($html -notmatch "/api/reset") {
             throw "Animated UI does not call /api/reset"
+          }
+
+          # Extract the embedded JavaScript and syntax-check it with Node.
+          $match = [regex]::Match($html, '<script>([\s\S]*?)</script>', 'IgnoreCase')
+          if (-not $match.Success) {
+            throw "Embedded UI script not found"
+          }
+          $js = ".\out\embedded-ui-check.js"
+          Set-Content -Path $js -Value $match.Groups[1].Value -Encoding UTF8
+          node --check $js
+          if ($LASTEXITCODE -ne 0) {
+            throw "Embedded UI JavaScript syntax check failed"
           }
 
       - name: Smoke test Kestrel + animated hardware API flow
@@ -78,35 +92,33 @@ jobs:
             }
             if (-not $healthy) { throw "Kestrel /healthz did not become healthy" }
 
-            # Verify the animated web UI is actually being served by this executable.
+            # Verify the executable serves the animated page, not an old UI.
             $page = Invoke-WebRequest "$base/" -UseBasicParsing
             if ($page.StatusCode -ne 200) { throw "GET / failed" }
             if ($page.Content -notmatch "Hardware Workflow Demo") {
               throw "Running executable is not serving the animated hardware UI"
             }
 
-            # Verify APIs required by the animated page exist and return JSON.
+            # Verify every API required by the animated page exists as JSON.
             $state = Invoke-RestMethod "$base/api/state"
             if (-not $state.phase) { throw "State API failed" }
 
             $eventsBefore = @(Invoke-RestMethod "$base/api/events")
             $ticketsBefore = @(Invoke-RestMethod "$base/api/tickets")
 
-            # Reset must be a real endpoint, not SPA fallback HTML.
             $reset = Invoke-RestMethod "$base/api/reset" -Method Post
             if ($reset.status -ne "reset") { throw "Reset API failed" }
 
-            # Start a full simulated truck cycle.
             $run = Invoke-RestMethod "$base/api/demo/run" -Method Post
             if ($run.status -ne "started") { throw "Demo run API failed" }
 
-            # Observe live intermediate state so we know the cycle actually moves.
+            # Verify a live intermediate state: the truck cycle must actually progress.
             Start-Sleep -Seconds 2
             $mid = Invoke-RestMethod "$base/api/state"
             if (-not $mid.running) { throw "Demo cycle is not running after start" }
             if (-not $mid.rfid) { throw "RFID stage did not occur" }
 
-            # Wait for completion with a bounded timeout.
+            # Wait for a full cycle to finish.
             $completed = $false
             for ($i = 0; $i -lt 40; $i++) {
               Start-Sleep -Milliseconds 500
@@ -145,6 +157,16 @@ jobs:
             if ($proc -and -not $proc.HasExited) {
               Stop-Process -Id $proc.Id -Force
             }
+          }
+
+      - name: Clean smoke-test data
+        shell: pwsh
+        run: |
+          if (Test-Path .\out\publish\data) {
+            Remove-Item .\out\publish\data -Recurse -Force
+          }
+          if (Test-Path .\out\embedded-ui-check.js) {
+            Remove-Item .\out\embedded-ui-check.js -Force
           }
 
       - name: Add local demo launchers
