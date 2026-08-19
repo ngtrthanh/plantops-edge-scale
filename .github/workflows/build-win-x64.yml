@@ -31,7 +31,7 @@ jobs:
         run: dotnet build -c Release --no-restore
 
       - name: Publish self-contained win-x64
-        run: dotnet publish -c Release -r win-x64 --self-contained true --no-restore -o out/publish
+        run: dotnet publish -c Release -r win-x64 --self-contained true -o out/publish
 
       - name: Verify executable
         shell: pwsh
