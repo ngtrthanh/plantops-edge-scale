@@ -1,143 +1,125 @@
-# PlantOps Edge Scale — Kestrel + Windows Service Demo
+# PlantOps Edge Scale
 
-Minimal proof-of-concept for the proposed WSM/PlantOps Edge runtime on Windows.
+Offline-first unmanned truck weighbridge Edge controller.
+
+## Direction
+
+The target runtime is now **Go single binary**:
 
 ```text
 Windows
-└── PlantOps.Edge.Scale.exe
-    ├── Windows Service capable
-    ├── Kestrel http://127.0.0.1:8080
-    ├── Backend + REST API
-    ├── animated static FE in wwwroot
-    ├── simulated scale/RFID/LPR/position inputs
-    ├── simulated lights/buzzer/barrier outputs
-    ├── live event stream
-    └── ticket write to data/tickets.jsonl
+└── plantops-edge-scale.exe
+    ├── embedded HTTP/API
+    ├── embedded operator UI
+    ├── domain state machine
+    ├── hardware adapters
+    ├── local durable persistence
+    ├── audit/events
+    └── Central sync
 ```
 
-No IIS. No Docker Desktop. No WSL2.
+No IIS. No Docker Desktop. No WSL2. No separate Node runtime. No language runtime bundle.
 
-## Animated hardware demo
+The existing C# / Kestrel demo remains in the repository temporarily as a validated behavioral reference during migration. It is not the long-term architecture.
 
-The browser demo visualizes one realistic truck cycle across the weighbridge:
+## Design truth
+
+Read these first:
+
+- `docs/EDGE-KNOWLEDGE.md` — operating rules, degraded/manual/lockout semantics, override policy.
+- `docs/PSEUDOCODE.md` — full repository behavior from process startup through truck cycle, override, persistence, sync, recovery, and deployment.
+- `docs/HARDWARE-WIRING.md` — hardware topology, signal map, wiring/commissioning/fault-injection plan.
+- `docs/GO-PORTING.md` — staged C# → Go cutover plan.
+
+## Non-negotiable safety/operations rules
 
 ```text
-truck arrives
-→ entry sensor detects truck
-→ RFID reader scans and matches tag
-→ plate camera captures image
-→ OCR processes and identifies plate
-→ entry light GREEN
-→ entry barrier OPEN
-→ truck drives onto scale
-→ front + rear position sensors confirm correct position
-→ entry barrier CLOSE
-→ weight settles
-→ stable weight accepted
-→ local ticket written
-→ buzzer sounds
-→ exit light GREEN
-→ exit barrier OPEN
-→ truck leaves
-→ exit sensor clears
-→ exit barrier CLOSE
-→ safe idle state
+Scale weight/stable authority: NEVER software-overridden.
+Auxiliary sensor override: transaction-scoped only.
+One allowed auxiliary failure: DEGRADED if fallback evidence is sufficient.
+Multiple correlated failures: MANUAL/supervisor path.
+Unsafe critical failure: FAULT_LOCKOUT.
+Local durable ticket commit: required before truck release.
+Central/WAN outage: must not stop a valid local weighing operation.
+Physical barrier safety: independent of application process.
 ```
 
-The UI includes:
-
-- animated truck movement;
-- live weighbridge weight;
-- RFID reader status;
-- plate camera capture + OCR status;
-- entry/front/rear/exit position sensors;
-- entry/exit traffic lights;
-- entry/exit barriers;
-- buzzer indication;
-- workflow timeline;
-- live Edge event stream;
-- saved ticket list.
-
-## Quick local demo
-
-GitHub Actions builds and smoke-tests a self-contained Windows x64 package. The generated ZIP contains:
+## Go vNext currently implemented
 
 ```text
-PlantOps.Edge.Scale.exe
-RUN-DEMO.cmd
-STOP-DEMO.cmd
-README-LOCAL-DEMO.txt
-wwwroot\...
-required .NET runtime files
+cmd/edge/main.go
+internal/domain/          health/mode/ticket/override policy
+internal/ports/           hardware/persistence boundaries
+internal/adapters/
+  modbustcp/              dependency-free Modbus TCP DI/coil client
+  scaleascii/             generic TCP scale transport/parser skeleton
+  ingress/                RFID + LPR normalized webhook ingress
+  jsonl/                  durable zero-dependency bootstrap ticket store
+internal/httpapi/          embedded API + embedded web UI
 ```
 
-Run it on Windows:
+The generic scale parser is intentionally not presented as the production scale protocol. A vendor-specific adapter must be written from the real controller manual/sample frames.
 
-```text
-1. Extract ZIP
-2. Double-click RUN-DEMO.cmd
-3. Browser opens http://127.0.0.1:8080
-4. Click Run truck cycle
-5. Double-click STOP-DEMO.cmd when finished
+## Go development
+
+```bash
+go test ./...
+go vet ./...
+go run ./cmd/edge
 ```
 
-No separate .NET runtime or SDK is required for the packaged demo because CI publishes it as self-contained `win-x64`.
-
-## APIs
+Open:
 
 ```text
+http://127.0.0.1:8080
+```
+
+Current normalized identity ingress:
+
+```text
+POST /io/rfid
+POST /io/lpr
+GET  /api/identity
 GET  /healthz
-GET  /api/state
-GET  /api/events
-GET  /api/tickets
-POST /api/demo/run
-POST /api/reset
 ```
 
-## CI verification
+## CI
 
-`.github/workflows/build-win-x64.yml` runs on a GitHub-hosted Windows runner and verifies:
+`.github/workflows/build-go-vnext.yml` runs tests/vet on a GitHub-hosted Windows runner, builds one Windows executable, launches it, verifies `/healthz`, injects RFID/LPR events, verifies normalized identity output, hashes the EXE, and uploads an immutable artifact.
+
+Target artifact:
 
 ```text
-restore
-→ build
-→ self-contained win-x64 publish
-→ EXE exists
-→ launch Kestrel
-→ /healthz
-→ state API
-→ simulated truck cycle
-→ ticket created
-→ package ZIP + SHA256
-→ upload artifact
+plantops-edge-scale.exe
+plantops-edge-scale.exe.sha256
 ```
 
-Artifact naming:
+## Hardware boundary
+
+Preferred architecture:
 
 ```text
-plantops-edge-scale-local-demo-win-x64-sha-<git_sha>.zip
-plantops-edge-scale-local-demo-win-x64-sha-<git_sha>.zip.sha256
+scale controller ─────────────── TCP/serial adapter ─┐
+Modbus TCP remote I/O ─ sensors/outputs ────────────┤
+RFID Ethernet reader ───────────────────────────────┤
+LPR camera / edge OCR ──────────────────────────────┤
+                                                     ↓
+                                            Go domain engine
 ```
 
-## Run from source
+The Edge app coordinates business workflow. It does not replace certified weighing authority or the barrier's physical anti-collision/safety circuit.
 
-```powershell
-dotnet run
-```
-
-## Production hardware boundary
-
-The current demo simulates the I/O sequence. Production adapters should replace simulator calls with real interfaces:
+## Migration status
 
 ```text
-Scale        → TCP/serial
-RFID         → TCP/serial/HTTP
-LPR/plate    → camera HTTP/event callback + OCR/LPR result
-Position     → PLC/digital inputs
-Lights       → PLC/relay outputs
-Buzzer       → PLC/relay output
-Barriers     → PLC/relay outputs
-Ticket       → local PostgreSQL
+Phase 0  C# behavioral reference                DONE
+Phase 1  Go skeleton + adapter boundaries       IN PROGRESS
+Phase 2  full Go event/state machine            NEXT
+Phase 3  SQLite persistence                     NEXT
+Phase 4  real scale-controller adapter          NEED PROTOCOL
+Phase 5  remote-I/O bench integration           PLANNED
+Phase 6  RFID/LPR real integration              PLANNED
+Phase 7  production shadow mode                 PLANNED
+Phase 8  supervised outputs                     PLANNED
+Phase 9  Go primary / C# retired                PLANNED
 ```
-
-The physical safety PLC/interlock remains authoritative for safe equipment movement. The Edge application coordinates business workflow and requests outputs; it must not be the only equipment safety layer.
