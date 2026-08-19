@@ -18,9 +18,13 @@ type Mapping struct {
 	ExitBarrierOpen    uint16
 	ExitBarrierClosed  uint16
 
-	EntryGreen         uint16
-	ExitGreen          uint16
-	Buzzer             uint16
+	// SafetyClear is optional in the adapter configuration but fail-safe in behavior:
+	// if it is not configured, PositionSnapshot.SafetyClear remains false.
+	SafetyClear *uint16
+
+	EntryGreen          uint16
+	ExitGreen           uint16
+	Buzzer              uint16
 	EntryBarrierOpenCmd uint16
 	ExitBarrierOpenCmd  uint16
 }
@@ -49,6 +53,16 @@ func (io *IO) ReadInputs(ctx context.Context) (domain.PositionSnapshot, error) {
 		}
 		values[i] = bits[0]
 	}
+
+	safetyClear := false
+	if io.Mapping.SafetyClear != nil {
+		bits, err := io.Client.ReadDiscreteInputs(ctx, *io.Mapping.SafetyClear, 1)
+		if err != nil {
+			return domain.PositionSnapshot{}, fmt.Errorf("read physical safety DI %d: %w", *io.Mapping.SafetyClear, err)
+		}
+		safetyClear = bits[0]
+	}
+
 	return domain.PositionSnapshot{
 		EntryPresent:       values[0],
 		FrontPresent:       values[1],
@@ -58,7 +72,7 @@ func (io *IO) ReadInputs(ctx context.Context) (domain.PositionSnapshot, error) {
 		EntryBarrierClosed: values[5],
 		ExitBarrierOpen:    values[6],
 		ExitBarrierClosed:  values[7],
-		SafetyClear:        true,
+		SafetyClear:        safetyClear,
 		Observed:           time.Now().UTC(),
 	}, nil
 }
