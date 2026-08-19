@@ -74,20 +74,27 @@ jobs:
             }
           }
 
-      - name: Package immutable artifact
+      - name: Add local demo launchers
+        shell: pwsh
+        run: |
+          Copy-Item .\pack\RUN-DEMO.cmd .\out\publish\RUN-DEMO.cmd
+          Copy-Item .\pack\STOP-DEMO.cmd .\out\publish\STOP-DEMO.cmd
+          Copy-Item .\pack\README-LOCAL-DEMO.txt .\out\publish\README-LOCAL-DEMO.txt
+
+      - name: Package immutable local demo artifact
         shell: pwsh
         run: |
           $sha = "${{ github.sha }}"
-          $zip = ".\out\plantops-edge-scale-win-x64-sha-$sha.zip"
+          $zip = ".\out\plantops-edge-scale-local-demo-win-x64-sha-$sha.zip"
           Compress-Archive -Path .\out\publish\* -DestinationPath $zip
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  plantops-edge-scale-win-x64-sha-$sha.zip" | Set-Content ".\out\plantops-edge-scale-win-x64-sha-$sha.zip.sha256"
+          "$hash  plantops-edge-scale-local-demo-win-x64-sha-$sha.zip" | Set-Content ".\out\plantops-edge-scale-local-demo-win-x64-sha-$sha.zip.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: plantops-edge-scale-${{ github.sha }}
+          name: plantops-edge-scale-local-demo-${{ github.sha }}
           path: |
-            out/plantops-edge-scale-win-x64-sha-${{ github.sha }}.zip
-            out/plantops-edge-scale-win-x64-sha-${{ github.sha }}.zip.sha256
+            out/plantops-edge-scale-local-demo-win-x64-sha-${{ github.sha }}.zip
+            out/plantops-edge-scale-local-demo-win-x64-sha-${{ github.sha }}.zip.sha256
           if-no-files-found: error
