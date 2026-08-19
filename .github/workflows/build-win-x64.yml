@@ -58,7 +58,6 @@ jobs:
             throw "Animated UI does not call /api/reset"
           }
 
-          # Extract the embedded JavaScript and syntax-check it with Node.
           $match = [regex]::Match($html, '<script>([\s\S]*?)</script>', 'IgnoreCase')
           if (-not $match.Success) {
             throw "Embedded UI script not found"
@@ -92,19 +91,18 @@ jobs:
             }
             if (-not $healthy) { throw "Kestrel /healthz did not become healthy" }
 
-            # Verify the executable serves the animated page, not an old UI.
             $page = Invoke-WebRequest "$base/" -UseBasicParsing
             if ($page.StatusCode -ne 200) { throw "GET / failed" }
             if ($page.Content -notmatch "Hardware Workflow Demo") {
               throw "Running executable is not serving the animated hardware UI"
             }
 
-            # Verify every API required by the animated page exists as JSON.
             $state = Invoke-RestMethod "$base/api/state"
             if (-not $state.phase) { throw "State API failed" }
 
-            $eventsBefore = @(Invoke-RestMethod "$base/api/events")
-            $ticketsBefore = @(Invoke-RestMethod "$base/api/tickets")
+            # These calls must return JSON arrays, not SPA fallback HTML.
+            $null = Invoke-RestMethod "$base/api/events"
+            $null = Invoke-RestMethod "$base/api/tickets"
 
             $reset = Invoke-RestMethod "$base/api/reset" -Method Post
             if ($reset.status -ne "reset") { throw "Reset API failed" }
@@ -112,13 +110,13 @@ jobs:
             $run = Invoke-RestMethod "$base/api/demo/run" -Method Post
             if ($run.status -ne "started") { throw "Demo run API failed" }
 
-            # Verify a live intermediate state: the truck cycle must actually progress.
+            # Verify a live intermediate state.
             Start-Sleep -Seconds 2
             $mid = Invoke-RestMethod "$base/api/state"
             if (-not $mid.running) { throw "Demo cycle is not running after start" }
             if (-not $mid.rfid) { throw "RFID stage did not occur" }
 
-            # Wait for a full cycle to finish.
+            # Wait for the full cycle.
             $completed = $false
             for ($i = 0; $i -lt 40; $i++) {
               Start-Sleep -Milliseconds 500
@@ -130,17 +128,19 @@ jobs:
             }
             if (-not $completed) { throw "Demo truck cycle did not complete" }
 
-            $eventsAfter = @(Invoke-RestMethod "$base/api/events")
-            $ticketsAfter = @(Invoke-RestMethod "$base/api/tickets")
+            $eventsAfter = Invoke-RestMethod "$base/api/events"
+            $ticketsAfter = Invoke-RestMethod "$base/api/tickets"
 
-            if ($eventsAfter.Count -le $eventsBefore.Count) {
-              throw "Event stream did not grow during demo cycle"
-            }
-            if ($ticketsAfter.Count -le $ticketsBefore.Count) {
-              throw "Demo cycle did not write a new ticket"
+            # Verify specific hardware-flow events instead of relying on PowerShell array counting semantics.
+            $sources = @($eventsAfter | ForEach-Object { $_.source })
+            foreach ($required in @("RFID", "CAMERA", "OCR", "TICKET", "FLOW")) {
+              if ($sources -notcontains $required) {
+                throw "Required event source missing: $required"
+              }
             }
 
             $latest = $ticketsAfter | Select-Object -First 1
+            if ($null -eq $latest) { throw "Demo cycle did not write a ticket" }
             if ($latest.plate -ne "15C-123.45") { throw "Plate capture/OCR result missing from ticket" }
             if ($latest.rfid -ne "RFID-DEMO-001") { throw "RFID result missing from ticket" }
             if ([int]$latest.weightKg -ne 28460) { throw "Stable weight missing from ticket" }
@@ -151,7 +151,7 @@ jobs:
             Write-Host "Plate: $($latest.plate)"
             Write-Host "RFID: $($latest.rfid)"
             Write-Host "Weight: $($latest.weightKg) kg"
-            Write-Host "Events: $($eventsAfter.Count)"
+            Write-Host "Event sources: $($sources -join ', ')"
           }
           finally {
             if ($proc -and -not $proc.HasExited) {
