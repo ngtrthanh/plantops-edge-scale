@@ -28,6 +28,7 @@ Read these first:
 
 - `docs/EDGE-KNOWLEDGE.md` — operating rules, degraded/manual/lockout semantics, override policy.
 - `docs/PSEUDOCODE.md` — full repository behavior from process startup through truck cycle, override, persistence, sync, recovery, and deployment.
+- `docs/RAW-WEIGHT-AUDIT.md` — mandatory all-frame raw scale journal, time-series reconstruction and integrity rules.
 - `docs/HARDWARE-WIRING.md` — hardware topology, signal map, wiring/commissioning/fault-injection plan.
 - `docs/GO-PORTING.md` — staged C# → Go cutover plan.
 
@@ -35,6 +36,8 @@ Read these first:
 
 ```text
 Scale weight/stable authority: NEVER software-overridden.
+Every scale frame: raw bytes + UTC timestamp durably journaled before business use.
+Raw audit persistence failure: reading cannot become ticket truth.
 Auxiliary sensor override: transaction-scoped only.
 One allowed auxiliary failure: DEGRADED if fallback evidence is sufficient.
 Multiple correlated failures: MANUAL/supervisor path.
@@ -48,11 +51,12 @@ Physical barrier safety: independent of application process.
 
 ```text
 cmd/edge/main.go
-internal/domain/          health/mode/ticket/override policy
+internal/domain/          health/mode/ticket/override + raw-weight event model
 internal/ports/           hardware/persistence boundaries
 internal/adapters/
   modbustcp/              dependency-free Modbus TCP DI/coil client
-  scaleascii/             generic TCP scale transport/parser skeleton
+  scaleascii/             generic TCP scale transport/parser + pre-use raw journaling hook
+  rawjournal/             durable append-only hash-chained raw weight JSONL journal
   ingress/                RFID + LPR normalized webhook ingress
   jsonl/                  durable zero-dependency bootstrap ticket store
 internal/httpapi/          embedded API + embedded web UI
@@ -114,6 +118,7 @@ The Edge app coordinates business workflow. It does not replace certified weighi
 ```text
 Phase 0  C# behavioral reference                DONE
 Phase 1  Go skeleton + adapter boundaries       IN PROGRESS
+Phase 1A raw weight audit journal               IMPLEMENTED BASELINE
 Phase 2  full Go event/state machine            NEXT
 Phase 3  SQLite persistence                     NEXT
 Phase 4  real scale-controller adapter          NEED PROTOCOL
