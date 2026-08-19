@@ -11,6 +11,10 @@ type Scale interface {
 	Read(context.Context) (domain.ScaleReading, error)
 }
 
+type RawWeightJournal interface {
+	Append(context.Context, domain.RawWeightEvent) error
+}
+
 type PositionIO interface {
 	ReadInputs(context.Context) (domain.PositionSnapshot, error)
 }
