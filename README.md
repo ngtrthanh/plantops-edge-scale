@@ -5,7 +5,7 @@ Minimal proof-of-concept for the proposed WSM/PlantOps Edge runtime on Windows.
 ```text
 Windows
 └── PlantOps.Edge.Scale.exe
-    ├── Windows Service
+    ├── Windows Service capable
     ├── Kestrel http://127.0.0.1:8080
     ├── Backend + REST API
     ├── static FE in wwwroot
@@ -16,9 +16,32 @@ Windows
 
 No IIS. No Docker Desktop. No WSL2.
 
-## Demo flow
+## Quick local demo
 
-Open `http://127.0.0.1:8080` and press **Run truck cycle**.
+GitHub Actions builds and smoke-tests a self-contained Windows x64 package. The generated ZIP contains:
+
+```text
+PlantOps.Edge.Scale.exe
+RUN-DEMO.cmd
+STOP-DEMO.cmd
+README-LOCAL-DEMO.txt
+wwwroot\...
+required .NET runtime files
+```
+
+Run it on Windows:
+
+```text
+1. Extract ZIP
+2. Double-click RUN-DEMO.cmd
+3. Browser opens http://127.0.0.1:8080
+4. Run the truck-cycle demo
+5. Double-click STOP-DEMO.cmd when finished
+```
+
+No separate .NET runtime or SDK is required for the packaged demo because CI publishes it as self-contained `win-x64`.
+
+## Demo flow
 
 ```text
 truck detected
@@ -37,12 +60,6 @@ truck detected
 → exit barrier CLOSED
 ```
 
-## Run from source
-
-```powershell
-dotnet run
-```
-
 ## APIs
 
 ```text
@@ -52,41 +69,40 @@ GET  /api/tickets
 POST /api/demo/run
 ```
 
-## GitHub Actions build
+## CI verification
 
-The workflow `.github/workflows/build-win-x64.yml` runs on a GitHub-hosted Windows runner, installs .NET SDK 10.0.302, compiles the project, publishes a self-contained `win-x64` build, and uploads:
-
-```text
-plantops-edge-scale-win-x64-sha-<git_sha>.zip
-plantops-edge-scale-win-x64-sha-<git_sha>.zip.sha256
-```
-
-The target Edge PC therefore does not need the .NET SDK or a separate .NET runtime for this demo artifact.
-
-## Install as Windows Service
-
-Extract the published folder to:
+`.github/workflows/build-win-x64.yml` runs on a GitHub-hosted Windows runner and verifies:
 
 ```text
-C:\WSM\PlantOps.Edge.Scale\
+restore
+→ build
+→ self-contained win-x64 publish
+→ EXE exists
+→ launch Kestrel
+→ /healthz
+→ state API
+→ simulated truck cycle
+→ ticket created
+→ package ZIP + SHA256
+→ upload artifact
 ```
 
-Then run elevated PowerShell:
+Artifact naming:
 
-```powershell
-.\scripts\install-service.ps1
+```text
+plantops-edge-scale-local-demo-win-x64-sha-<git_sha>.zip
+plantops-edge-scale-local-demo-win-x64-sha-<git_sha>.zip.sha256
 ```
 
-Check:
+## Run from source
 
 ```powershell
-Get-Service PlantOps.Edge.Scale
-curl http://127.0.0.1:8080/healthz
+dotnet run
 ```
 
 ## Hardware boundary
 
-The current demo simulates the I/O sequence only. Production adapters should replace the simulator calls with real interfaces:
+The current demo simulates the I/O sequence only. Production adapters should replace simulator calls with real interfaces:
 
 ```text
 Scale        → TCP/serial
