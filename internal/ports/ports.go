@@ -35,6 +35,10 @@ type LPR interface {
 	Latest() domain.LPRObservation
 }
 
+type VehicleRegistry interface {
+	ResolveRFID(context.Context, string) (domain.VehicleIdentity, bool, error)
+}
+
 type TicketStore interface {
 	Commit(context.Context, domain.Ticket) error
 }
