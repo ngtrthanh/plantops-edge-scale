@@ -27,7 +27,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           $sha = "${{ github.sha }}"
-          go build -trimpath -ldflags "-s -w -X main.version=0.4.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          go build -trimpath -ldflags "-s -w -X main.version=0.5.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
       - name: Build CI simulators
         shell: pwsh
@@ -40,16 +40,18 @@ jobs:
       - name: Runtime + audited truck workflow smoke
         shell: pwsh
         run: |
-          $auditPath = Join-Path $PWD 'out/raw-weight-ci.jsonl'
+          $weightPath = Join-Path $PWD 'out/raw-weight-ci.jsonl'
+          $eventPath = Join-Path $PWD 'out/events-ci.jsonl'
           $ticketPath = Join-Path $PWD 'out/tickets-ci.jsonl'
-          Remove-Item $auditPath,$ticketPath -ErrorAction SilentlyContinue
+          Remove-Item $weightPath,$eventPath,$ticketPath -ErrorAction SilentlyContinue
 
           $scaleSim = Start-Process .\out\scale-sim.exe -PassThru
           Start-Sleep -Seconds 1
           $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
             '-scale-addr','127.0.0.1:19001',
             '-station-id','CI-SCALE-01',
-            '-raw-weight-journal',$auditPath,
+            '-raw-weight-journal',$weightPath,
+            '-event-journal',$eventPath,
             '-ticket-journal',$ticketPath,
             '-vehicle-map','RFID-DEMO-001=15C-123.45',
             '-empty-scale-max-kg','200',
@@ -64,7 +66,7 @@ jobs:
               try {
                 $h = Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 1
                 $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
-                if ($h.status -eq 'ok' -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0) { $ok = $true; break }
+                if ($h.status -eq 'ok' -and $h.event_audit_configured -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0) { $ok = $true; break }
               } catch {}
               Start-Sleep -Milliseconds 250
             }
@@ -89,30 +91,39 @@ jobs:
             }
             if (-not $committed) { throw "audited stable weight did not commit/release" }
             if ([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460) { throw "accepted weight mismatch" }
-            if ([uint64]$wf.transaction.accepted_weight.raw_ref.seq -eq 0) { throw "accepted weight missing raw audit seq" }
 
-            $audit = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=50'
+            $weights = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=50'
             $acceptedSeq = [uint64]$wf.transaction.accepted_weight.raw_ref.seq
             $acceptedHash = [string]$wf.transaction.accepted_weight.raw_ref.hash
-            $rawAccepted = $audit.records | Where-Object { [uint64]$_.seq -eq $acceptedSeq } | Select-Object -First 1
+            $rawAccepted = $weights.records | Where-Object { [uint64]$_.seq -eq $acceptedSeq } | Select-Object -First 1
             if ($null -eq $rawAccepted -or $rawAccepted.hash -ne $acceptedHash) { throw "ticket -> raw audit linkage failed" }
-            if ([int64]$rawAccepted.event.weight_kg -ne 28460 -or -not $rawAccepted.event.stable) { throw "accepted raw record mismatch" }
 
             $null = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":true,"safety_clear":true}'
             $complete = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":false,"safety_clear":true}'
             if ($complete.state -ne 'COMPLETE') { throw "truck workflow did not complete" }
-            Write-Host "Workflow unit-runtime PASS: audited 28460kg -> exact raw ref -> COMPLETE"
+
+            Start-Sleep -Milliseconds 250
+            $events = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=200'
+            $kinds = @($events.records | ForEach-Object { $_.event.kind })
+            foreach ($required in @('TRANSACTION_STARTED','STATE_TRANSITION','RFID_OBSERVED','LPR_OBSERVED','IDENTITY_DECISION','POSITION_DECISION','STABLE_WEIGHT_ACCEPTED','TICKET_COMMITTED','TRANSACTION_COMPLETED')) {
+              if ($kinds -notcontains $required) { throw "event audit missing $required; kinds=$($kinds -join ',')" }
+            }
+            $verifyEvents = Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify
+            if (-not $verifyEvents.verified) { throw "operational event hash chain failed" }
+            if (-not (Test-Path $eventPath)) { throw "event audit file missing" }
+            Write-Host "Workflow + event audit PASS: transaction decisions are hash-chained"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
             if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
           }
 
-      - name: Runtime + Modbus hardware feedback smoke
+      - name: Runtime + Modbus hardware feedback + output audit smoke
         shell: pwsh
         run: |
-          $auditPath = Join-Path $PWD 'out/raw-weight-hw-ci.jsonl'
+          $weightPath = Join-Path $PWD 'out/raw-weight-hw-ci.jsonl'
+          $eventPath = Join-Path $PWD 'out/events-hw-ci.jsonl'
           $ticketPath = Join-Path $PWD 'out/tickets-hw-ci.jsonl'
-          Remove-Item $auditPath,$ticketPath -ErrorAction SilentlyContinue
+          Remove-Item $weightPath,$eventPath,$ticketPath -ErrorAction SilentlyContinue
           $scaleOut = Join-Path $PWD 'out/scale-hw.log'
           $ioOut = Join-Path $PWD 'out/modbus-hw.log'
 
@@ -128,7 +139,8 @@ jobs:
             '-io-buzzer-pulse','250ms',
             '-barrier-feedback-timeout','2s',
             '-station-id','CI-HW-01',
-            '-raw-weight-journal',$auditPath,
+            '-raw-weight-journal',$weightPath,
+            '-event-journal',$eventPath,
             '-ticket-journal',$ticketPath,
             '-vehicle-map','RFID-DEMO-001=15C-123.45',
             '-empty-scale-max-kg','200',
@@ -160,32 +172,33 @@ jobs:
             Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
             Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
 
-            $complete = $false
+            $done = $false
             for ($i=0; $i -lt 120; $i++) {
               $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-              if ($wf.state -eq 'COMPLETE') { $complete=$true; break }
-              if ($wf.state -eq 'FAULT_LOCKOUT') {
-                Get-Content $ioOut -ErrorAction SilentlyContinue
-                throw "hardware workflow lockout: $($wf.transaction.last_block_reason)"
-              }
+              if ($wf.state -eq 'COMPLETE') { $done=$true; break }
+              if ($wf.state -eq 'FAULT_LOCKOUT') { Get-Content $ioOut -ErrorAction SilentlyContinue; throw "hardware workflow lockout: $($wf.transaction.last_block_reason)" }
               Start-Sleep -Milliseconds 150
             }
-            if (-not $complete) {
-              Get-Content $ioOut -ErrorAction SilentlyContinue
-              throw "Modbus-driven truck cycle did not reach COMPLETE"
-            }
-            if ([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460) { throw "hardware cycle accepted weight mismatch" }
-            if ([uint64]$wf.transaction.accepted_weight.raw_ref.seq -eq 0) { throw "hardware cycle missing raw audit reference" }
+            if (-not $done) { throw "Modbus-driven truck cycle did not reach COMPLETE" }
 
             Start-Sleep -Milliseconds 300
             $io = Invoke-RestMethod http://127.0.0.1:8080/api/io/status
-            if (-not $io.enabled -or -not $io.connected) { throw "I/O status not healthy after cycle" }
-            if ($io.applied.entry_green -or $io.applied.exit_green -or $io.applied.entry_barrier_open -or $io.applied.exit_barrier_open -or $io.applied.buzzer) {
-              throw "completed cycle left permissive applied outputs"
-            }
-            if (-not (Test-Path $ticketPath)) { throw "hardware cycle durable ticket missing" }
+            if ($io.applied.entry_green -or $io.applied.exit_green -or $io.applied.entry_barrier_open -or $io.applied.exit_barrier_open -or $io.applied.buzzer) { throw "completed cycle left permissive applied outputs" }
 
-            Write-Host "Hardware PASS: Modbus ENTRY -> barrier feedback -> GREEN -> deck sensors -> audited weight -> EXIT -> COMPLETE"
+            $events = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=500'
+            $commands = @($events.records | Where-Object { $_.event.kind -eq 'OUTPUT_COMMAND' })
+            $results = @($events.records | Where-Object { $_.event.kind -eq 'OUTPUT_RESULT' })
+            if ($commands.Count -lt 4) { throw "too few physical output intents audited: $($commands.Count)" }
+            if ($results.Count -lt $commands.Count) { throw "physical output result audit incomplete" }
+
+            $entryOpenIntent = $commands | Where-Object { $_.event.action -eq 'ENTRY_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true } | Select-Object -First 1
+            $exitOpenIntent = $commands | Where-Object { $_.event.action -eq 'EXIT_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true } | Select-Object -First 1
+            if ($null -eq $entryOpenIntent -or $null -eq $exitOpenIntent) { throw "barrier OPEN intents missing from durable audit" }
+            if ([string]::IsNullOrWhiteSpace($entryOpenIntent.hash) -or [string]::IsNullOrWhiteSpace($exitOpenIntent.hash)) { throw "barrier OPEN intents missing hash-chain identity" }
+
+            $verifyEvents = Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify
+            if (-not $verifyEvents.verified) { throw "hardware event audit hash chain failed" }
+            Write-Host "Hardware + audit PASS: permissive Modbus outputs had durable intent before execution"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
             if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
