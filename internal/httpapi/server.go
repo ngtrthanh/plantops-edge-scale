@@ -61,7 +61,7 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, records)
+		writeJSON(w, http.StatusOK, map[string]any{"count": len(records), "records": records})
 	})
 	mux.HandleFunc("GET /api/audit/weights/verify", func(w http.ResponseWriter, _ *http.Request) {
 		if s.WeightAudit == nil {
