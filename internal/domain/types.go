@@ -34,6 +34,7 @@ const (
 	DeviceExitBarrier    DeviceID = "EXIT_BARRIER"
 	DevicePhysicalSafety DeviceID = "PHYSICAL_SAFETY"
 	DeviceRemoteIO       DeviceID = "REMOTE_IO"
+	DeviceAuditStore     DeviceID = "AUDIT_STORE"
 )
 
 type Role string
