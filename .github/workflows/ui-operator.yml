@@ -87,16 +87,17 @@ jobs:
               '--no-default-browser-check',
               '--disable-background-networking',
               "--user-data-dir=$profile",
+              '--virtual-time-budget=800',
               '--dump-dom',
               'http://127.0.0.1:8092/operator.html?demo=1&phase=WEIGHING&hold=1'
             )
             Write-Host "Headless browser: $browser"
             $dom = (& $browser @browserArgs 2>&1 | Out-String)
             $dom | Set-Content out/operator-ui-rendered.html
-            if ($dom -notmatch 'VISUAL DEMO · NO HARDWARE WRITES') { throw 'browser-rendered demo banner missing' }
-            if ($dom -notmatch 'id="stateBadge"[^>]*>WEIGHING</span>') { throw 'browser did not render held WEIGHING state' }
-            if ($dom -notmatch 'id="weight"[^>]*>28,420 kg</div>') { throw 'browser-rendered held weight missing' }
-            if ($dom -notmatch '15C-123.45') { throw 'browser-rendered LPR identity missing' }
+            if ($dom -notmatch 'data-ui-mode="demo"') { throw 'browser probe: demo JavaScript did not execute' }
+            if ($dom -notmatch 'data-ui-state="WEIGHING"') { throw 'browser probe: held state is not WEIGHING' }
+            if ($dom -notmatch 'data-ui-weight="28420"') { throw 'browser probe: held weight is not 28420' }
+            if ($dom -notmatch 'data-ui-plate="15C-123.45"') { throw 'browser probe: LPR identity missing' }
             Write-Host "Operator UI PASS: embedded assets served and JavaScript executed in $browser"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
