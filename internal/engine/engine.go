@@ -17,17 +17,18 @@ import (
 
 type Config struct {
 	StationID           string
+	EmptyScaleMaxKG     int64
 	MinStableWeightKG   int64
 	StableConfirmations int
 	StableToleranceKG   int64
 }
 
 type Snapshot struct {
-	StationID  string                      `json:"station_id"`
-	State      domain.WorkflowState        `json:"state"`
-	Mode       domain.Mode                 `json:"mode"`
-	Transaction *domain.Transaction        `json:"transaction,omitempty"`
-	LatestScale *domain.AuditedScaleReading `json:"latest_scale,omitempty"`
+	StationID   string                       `json:"station_id"`
+	State       domain.WorkflowState         `json:"state"`
+	Mode        domain.Mode                  `json:"mode"`
+	Transaction *domain.Transaction          `json:"transaction,omitempty"`
+	LatestScale *domain.AuditedScaleReading  `json:"latest_scale,omitempty"`
 }
 
 type Engine struct {
@@ -48,6 +49,9 @@ type Engine struct {
 func New(cfg Config, tickets ports.TicketStore, registry ports.VehicleRegistry) *Engine {
 	if cfg.StationID == "" {
 		cfg.StationID = "EDGE-01"
+	}
+	if cfg.EmptyScaleMaxKG <= 0 {
+		cfg.EmptyScaleMaxKG = 500
 	}
 	if cfg.MinStableWeightKG <= 0 {
 		cfg.MinStableWeightKG = 500
@@ -107,7 +111,7 @@ func (e *Engine) ObservePosition(ctx context.Context, p domain.PositionSnapshot)
 	e.tx.PositionSnapshot = p
 	e.touchLocked(p.Observed)
 
-	if e.tx.State == domain.StateComplete {
+	if e.tx.State == domain.StateComplete || e.tx.State == domain.StateFaultLockout {
 		return nil
 	}
 
@@ -189,13 +193,31 @@ func (e *Engine) ObserveScale(ctx context.Context, audited domain.AuditedScaleRe
 
 	r := audited.Reading
 	if r.Health != domain.HealthHealthy || r.Fault != "" || r.Overload {
-		e.lockoutLocked("authoritative scale unhealthy/faulted/overload")
-		return nil
-	}
-	if e.tx == nil || e.tx.State == domain.StateComplete {
+		e.faults[domain.DeviceScale] = domain.Fault{
+			Device: domain.DeviceScale, Health: r.Health, Reason: "authoritative scale unhealthy/faulted/overload",
+			Overridable: false, Critical: true,
+		}
+		if e.tx != nil {
+			e.syncFaultSliceLocked()
+			e.lockoutLocked("authoritative scale unhealthy/faulted/overload")
+		}
 		return nil
 	}
 
+	// A fresh audited healthy controller frame clears a pre-transaction scale
+	// transport fault. It never auto-unlocks an already locked transaction.
+	delete(e.faults, domain.DeviceScale)
+	if e.tx != nil && e.tx.State != domain.StateFaultLockout {
+		e.syncFaultSliceLocked()
+	}
+	if e.tx == nil || e.tx.State == domain.StateComplete || e.tx.State == domain.StateFaultLockout {
+		return nil
+	}
+
+	if e.tx.Identity == domain.IdentityAccepted &&
+		(e.tx.State == domain.StateApproach || e.tx.State == domain.StateIdentifying) {
+		e.tryAuthorizeEntryLocked()
+	}
 	e.tryReadyToWeighLocked()
 	if e.tx.State == domain.StateReadyToWeigh {
 		e.transitionLocked(domain.StateWeighing)
@@ -335,6 +357,12 @@ func (e *Engine) startTransactionLocked(observed time.Time) {
 		Outputs: domain.DesiredOutputs{},
 	}
 	e.syncFaultSliceLocked()
+	for _, f := range e.faults {
+		if f.Device == domain.DeviceScale || f.Critical || !f.Overridable {
+			e.lockoutLocked(fmt.Sprintf("active critical fault at transaction start: %s: %s", f.Device, f.Reason))
+			return
+		}
+	}
 	e.updateModeLocked()
 	e.transitionLocked(domain.StateIdentifying)
 }
@@ -433,7 +461,20 @@ func (e *Engine) tryAuthorizeEntryLocked() {
 		return
 	}
 	if p.FrontPresent || p.RearPresent {
-		e.tx.LastBlockReason = "scale deck is already occupied"
+		e.tx.LastBlockReason = "scale deck position sensors show occupied"
+		return
+	}
+	if e.lastScale == nil {
+		e.tx.LastBlockReason = "entry blocked until an audited scale reading proves empty deck"
+		return
+	}
+	r := e.lastScale.Reading
+	if r.Health != domain.HealthHealthy || r.Fault != "" || r.Overload {
+		e.lockoutLocked("entry blocked: authoritative scale unhealthy/faulted/overload")
+		return
+	}
+	if !r.Stable || abs64(r.WeightKG) > e.cfg.EmptyScaleMaxKG {
+		e.tx.LastBlockReason = fmt.Sprintf("entry blocked: scale not proven empty/stable (weight=%d kg, stable=%v)", r.WeightKG, r.Stable)
 		return
 	}
 	e.transitionLocked(domain.StateEntryAuthorized)
@@ -453,7 +494,6 @@ func (e *Engine) evaluatePositionLocked() {
 	switch {
 	case !frontFault && !rearFault && p.FrontPresent && p.RearPresent:
 		e.tx.Position = domain.PositionAccepted
-		e.tx.Mode = maxMode(e.tx.Mode, domain.ModeNormal)
 		e.tx.Outputs.EntryGreen = false
 		e.tx.Outputs.EntryBarrierOpen = false
 		e.tx.LastBlockReason = ""
@@ -485,10 +525,7 @@ func (e *Engine) tryReadyToWeighLocked() {
 	if e.tx == nil || e.tx.State == domain.StateFaultLockout || e.tx.State == domain.StateComplete {
 		return
 	}
-	if e.tx.Identity != domain.IdentityAccepted {
-		return
-	}
-	if e.tx.Position != domain.PositionAccepted {
+	if e.tx.Identity != domain.IdentityAccepted || e.tx.Position != domain.PositionAccepted {
 		return
 	}
 	if e.lastScale == nil {
@@ -673,26 +710,6 @@ func roleRank(r domain.Role) int {
 		return 1
 	default:
 		return 0
-	}
-}
-
-func maxMode(a, b domain.Mode) domain.Mode {
-	if modeRank(b) > modeRank(a) {
-		return b
-	}
-	return a
-}
-
-func modeRank(m domain.Mode) int {
-	switch m {
-	case domain.ModeLockout:
-		return 4
-	case domain.ModeManual:
-		return 3
-	case domain.ModeDegraded:
-		return 2
-	default:
-		return 1
 	}
 }
 
