@@ -82,10 +82,10 @@ type LPRObservation struct {
 
 type Fault struct {
 	Device      DeviceID `json:"device"`
-	Health      Health   `json:"health"`
-	Reason      string   `json:"reason"`
-	Overridable bool     `json:"overridable"`
-	Critical    bool     `json:"critical"`
+	Health      Health    `json:"health"`
+	Reason      string    `json:"reason"`
+	Overridable bool      `json:"overridable"`
+	Critical    bool      `json:"critical"`
 }
 
 type Override struct {
@@ -101,14 +101,16 @@ type Override struct {
 }
 
 type Ticket struct {
-	ID            string     `json:"id"`
-	StationID     string     `json:"station_id"`
-	TransactionID string     `json:"transaction_id"`
-	Plate         string     `json:"plate"`
-	RFID          string     `json:"rfid"`
-	WeightKG      int64      `json:"weight_kg"`
-	Mode          Mode       `json:"mode"`
-	Overrides     []Override `json:"overrides,omitempty"`
-	CommittedAt   time.Time  `json:"committed_at"`
-	SyncedAt      *time.Time `json:"synced_at,omitempty"`
+	ID                string       `json:"id"`
+	StationID         string       `json:"station_id"`
+	TransactionID     string       `json:"transaction_id"`
+	Plate             string       `json:"plate"`
+	RFID              string       `json:"rfid"`
+	WeightKG          int64        `json:"weight_kg"`
+	WeightObservedAt  time.Time    `json:"weight_observed_at"`
+	WeightRawRef      RawWeightRef `json:"weight_raw_ref"`
+	Mode              Mode         `json:"mode"`
+	Overrides         []Override   `json:"overrides,omitempty"`
+	CommittedAt       time.Time    `json:"committed_at"`
+	SyncedAt          *time.Time   `json:"synced_at,omitempty"`
 }

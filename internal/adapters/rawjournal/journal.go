@@ -40,22 +40,31 @@ type Journal struct {
 	prevHash    string
 }
 
+// Append preserves the original simple journal port.
 func (j *Journal) Append(ctx context.Context, event domain.RawWeightEvent) error {
+	_, err := j.AppendRecord(ctx, event)
+	return err
+}
+
+// AppendRecord durably appends one event and returns the immutable sequence/hash
+// reference that derived facts can store. The reference is returned only after
+// write + fsync + close succeed.
+func (j *Journal) AppendRecord(ctx context.Context, event domain.RawWeightEvent) (domain.RawWeightRef, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
 	if j.Path == "" {
-		return errors.New("raw weight journal path is empty")
+		return domain.RawWeightRef{}, errors.New("raw weight journal path is empty")
 	}
 	if err := os.MkdirAll(filepath.Dir(j.Path), 0o755); err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	if !j.initialized {
 		if err := j.loadTail(); err != nil {
-			return err
+			return domain.RawWeightRef{}, err
 		}
 	}
 
@@ -63,35 +72,35 @@ func (j *Journal) Append(ctx context.Context, event domain.RawWeightEvent) error
 	payload := hashPayload{Seq: next, PrevHash: j.prevHash, Event: event}
 	canonical, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	sum := sha256.Sum256(canonical)
 	hash := hex.EncodeToString(sum[:])
 	record := Record{Seq: next, PrevHash: j.prevHash, Event: event, Hash: hash}
 	line, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 
 	f, err := os.OpenFile(j.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		_ = f.Close()
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		return err
+		return domain.RawWeightRef{}, err
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return domain.RawWeightRef{}, err
 	}
 
 	j.seq = next
 	j.prevHash = hash
-	return nil
+	return domain.RawWeightRef{Seq: next, Hash: hash}, nil
 }
 
 // Tail returns the newest audit records in chronological order. It is a

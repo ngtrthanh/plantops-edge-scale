@@ -12,18 +12,22 @@ import (
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/ingress"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/rawjournal"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/scaleascii"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/domain"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/engine"
 )
 
 //go:embed web/*
 var webFS embed.FS
 
 type Server struct {
-	RFID         *ingress.RFID
-	LPR          *ingress.LPR
-	WeightAudit  *rawjournal.Journal
-	ScaleMonitor *scaleascii.Monitor
-	Version      string
-	GitSHA       string
+	RFID            *ingress.RFID
+	LPR             *ingress.LPR
+	WeightAudit     *rawjournal.Journal
+	ScaleMonitor    *scaleascii.Monitor
+	Workflow        *engine.Engine
+	AllowSimulation bool
+	Version         string
+	GitSHA          string
 }
 
 func (s *Server) Handler() http.Handler {
@@ -36,7 +40,17 @@ func (s *Server) Handler() http.Handler {
 		if s.ScaleMonitor != nil {
 			payload["scale"] = s.ScaleMonitor.Snapshot()
 		}
+		if s.Workflow != nil {
+			payload["workflow"] = s.Workflow.Snapshot()
+		}
 		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("GET /api/workflow", func(w http.ResponseWriter, _ *http.Request) {
+		if s.Workflow == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "workflow engine not configured"})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.Workflow.Snapshot())
 	})
 	mux.HandleFunc("GET /api/scale/status", func(w http.ResponseWriter, _ *http.Request) {
 		if s.ScaleMonitor == nil {
@@ -106,6 +120,56 @@ func (s *Server) Handler() http.Handler {
 		s.LPR.Ingest(in.Plate, in.Confidence, in.ImageRef)
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 	})
+
+	if s.AllowSimulation && s.Workflow != nil {
+		mux.HandleFunc("POST /sim/position", func(w http.ResponseWriter, r *http.Request) {
+			var p domain.PositionSnapshot
+			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if p.Observed.IsZero() {
+				p.Observed = time.Now().UTC()
+			}
+			if err := s.Workflow.ObservePosition(r.Context(), p); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
+		})
+		mux.HandleFunc("POST /sim/fault", func(w http.ResponseWriter, r *http.Request) {
+			var f domain.Fault
+			if err := json.NewDecoder(r.Body).Decode(&f); err != nil || f.Device == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid device fault required"})
+				return
+			}
+			if err := s.Workflow.ObserveFault(r.Context(), f); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
+		})
+		mux.HandleFunc("POST /sim/override", func(w http.ResponseWriter, r *http.Request) {
+			var o domain.Override
+			if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if err := s.Workflow.AuthorizeOverride(r.Context(), o); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
+		})
+		mux.HandleFunc("POST /sim/reset-complete", func(w http.ResponseWriter, _ *http.Request) {
+			if err := s.Workflow.ResetCompleted(); err != nil {
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, s.Workflow.Snapshot())
+		})
+	}
+
 	static, _ := fs.Sub(webFS, "web")
 	mux.Handle("/", http.FileServer(http.FS(static)))
 	return mux

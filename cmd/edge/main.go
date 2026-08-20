@@ -9,8 +9,12 @@ import (
 	"time"
 
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/ingress"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/jsonl"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/rawjournal"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/registry"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/scaleascii"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/domain"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/engine"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/httpapi"
 )
 
@@ -24,7 +28,14 @@ func main() {
 	stationID := flag.String("station-id", "EDGE-01", "stable station identifier used in audit records")
 	scaleAddr := flag.String("scale-addr", "", "scale controller TCP address host:port; empty disables live collector")
 	rawWeightJournal := flag.String("raw-weight-journal", "data/raw-weight.jsonl", "append-only raw weight audit journal path")
+	ticketJournal := flag.String("ticket-journal", "data/tickets.jsonl", "durable local ticket journal path")
 	reconnectDelay := flag.Duration("scale-reconnect-delay", 2*time.Second, "delay before reconnecting to scale controller")
+	vehicleMap := flag.String("vehicle-map", "", "bootstrap RFID=PLATE pairs separated by commas")
+	emptyScaleMaxKG := flag.Int64("empty-scale-max-kg", 500, "maximum absolute stable weight treated as empty deck for entry")
+	minStableWeightKG := flag.Int64("min-stable-weight-kg", 1000, "minimum stable weight eligible for ticket acceptance")
+	stableConfirmations := flag.Int("stable-confirmations", 2, "consecutive authoritative stable frames required")
+	stableToleranceKG := flag.Int64("stable-tolerance-kg", 20, "maximum delta between stable confirmation frames")
+	simulation := flag.Bool("simulation", false, "enable explicit /sim/* test ingress endpoints")
 	flag.Parse()
 
 	audit := &rawjournal.Journal{Path: *rawWeightJournal}
@@ -32,37 +43,80 @@ func main() {
 		log.Fatalf("raw weight audit integrity check failed: %v", err)
 	}
 
+	vehicleRegistry, err := registry.Parse(*vehicleMap)
+	if err != nil {
+		log.Fatalf("vehicle map: %v", err)
+	}
+	tickets := &jsonl.Store{Path: *ticketJournal}
+	workflow := engine.New(engine.Config{
+		StationID: *stationID,
+		EmptyScaleMaxKG: *emptyScaleMaxKG,
+		MinStableWeightKG: *minStableWeightKG,
+		StableConfirmations: *stableConfirmations,
+		StableToleranceKG: *stableToleranceKG,
+	}, tickets, vehicleRegistry)
+
+	rfid := &ingress.RFID{}
+	lpr := &ingress.LPR{}
+	rfid.OnObservation = func(o domain.RFIDObservation) {
+		if err := workflow.ObserveRFID(context.Background(), o); err != nil {
+			log.Printf("workflow RFID observation: %v", err)
+		}
+	}
+	lpr.OnObservation = func(o domain.LPRObservation) {
+		if err := workflow.ObserveLPR(context.Background(), o); err != nil {
+			log.Printf("workflow LPR observation: %v", err)
+		}
+	}
+
 	scaleMonitor := scaleascii.NewMonitor(*scaleAddr != "", *scaleAddr)
 	if *scaleAddr != "" {
 		collector := &scaleascii.StreamCollector{
 			Addr: *scaleAddr,
 			StationID: *stationID,
+			TransactionID: workflow.ActiveTransactionID,
 			Journal: audit,
 			ReconnectDelay: *reconnectDelay,
-			OnReading: scaleMonitor.Reading,
-			OnFault: scaleMonitor.Fault,
+			OnReading: func(a domain.AuditedScaleReading) {
+				scaleMonitor.Reading(a.Reading)
+				_ = workflow.ClearFault(context.Background(), domain.DeviceScale)
+				if err := workflow.ObserveScale(context.Background(), a); err != nil {
+					log.Printf("workflow audited scale observation: %v", err)
+				}
+			},
+			OnFault: func(err error) {
+				scaleMonitor.Fault(err)
+				_ = workflow.ObserveFault(context.Background(), domain.Fault{
+					Device: domain.DeviceScale, Health: domain.HealthFault,
+					Reason: err.Error(), Overridable: false, Critical: true,
+				})
+			},
 		}
 		go func() {
 			if err := collector.Run(context.Background()); err != nil {
 				scaleMonitor.Fault(err)
-				// Keep HTTP/operator visibility alive, but stop consuming weights.
-				// The future state engine treats this condition as FAULT_LOCKOUT.
+				_ = workflow.ObserveFault(context.Background(), domain.Fault{
+					Device: domain.DeviceScale, Health: domain.HealthFault,
+					Reason: "raw weight collector stopped: " + err.Error(),
+					Overridable: false, Critical: true,
+				})
 				log.Printf("CRITICAL raw weight collector stopped: %v", err)
 			}
 		}()
 		log.Printf("raw weight collector enabled station=%s scale=%s journal=%s", *stationID, *scaleAddr, *rawWeightJournal)
 	} else {
-		log.Printf("raw weight collector disabled: start with -scale-addr host:port; existing audit remains readable at %s", *rawWeightJournal)
+		log.Printf("raw weight collector disabled: entry authorization cannot pass empty-scale proof until live audited scale is configured")
 	}
 
 	s := &httpapi.Server{
-		RFID: &ingress.RFID{}, LPR: &ingress.LPR{},
-		WeightAudit: audit, ScaleMonitor: scaleMonitor,
+		RFID: rfid, LPR: lpr,
+		WeightAudit: audit, ScaleMonitor: scaleMonitor, Workflow: workflow,
+		AllowSimulation: *simulation,
 		Version: version, GitSHA: gitSHA,
 	}
 	httpServer := &http.Server{
 		Addr: *listen, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("plantops-edge-scale Go vNext %s sha=%s listening on http://%s", version, gitSHA, *listen)
+	log.Printf("plantops-edge-scale Go vNext %s sha=%s listening on http://%s simulation=%v", version, gitSHA, *listen, *simulation)
 	log.Fatal(httpServer.ListenAndServe())
 }
