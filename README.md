@@ -7,24 +7,51 @@ Offline-first unmanned truck weighbridge Edge controller.
 ```text
 Windows
 └── plantops-edge-scale.exe
-    ├── embedded HTTP/API + operator UI
+    ├── embedded HTTP/API + animated operator UI
     ├── deterministic audited truck workflow
     ├── scale / Modbus / RFID / LPR adapters
     ├── embedded pure-Go SQLite business persistence
     └── durable local audit + Central sync queue
 ```
 
-Production target: **one Go EXE**. No IIS, Docker Desktop, WSL2, Node, .NET runtime, PostgreSQL service, CGO, or SQLite DLL.
+Production target: **one Go EXE**. No IIS, Docker Desktop, WSL2, Node, .NET runtime, PostgreSQL service, CGO, SQLite DLL, CDN, or separate frontend server.
 
 Persistent files:
 
 ```text
 data/edge.db             tickets + overrides + sync queue + station state
- data/raw-weight.jsonl   all controller frames / exact bytes / hash chain
- data/events.jsonl       decisions + overrides + faults + output command/result hash chain
+data/raw-weight.jsonl    all controller frames / exact bytes / hash chain
+data/events.jsonl        decisions + overrides + faults + output command/result hash chain
 ```
 
 The independent audit journals are intentional: forensic evidence remains directly inspectable and hash-verifiable even if relational storage is unavailable.
+
+## Operator UI
+
+Open the Edge root URL or `/operator.html`.
+
+The operator console is embedded in the Go binary and acts as a state-driven digital twin. It does not invent interlocks in the browser: truck position, barriers, signal lamps, sensors, identity, stable weight and audit data are rendered from backend workflow/I/O truth.
+
+```text
+LIVE
+├── workflow timeline
+├── animated truck / scale / entry + exit barriers
+├── RFID scan + LPR camera indication
+├── entry / front / rear / exit sensor state
+├── authoritative live/stable weight
+├── raw audited weight curve
+├── hardware connection status
+├── SQLite ticket + pending-sync status
+└── operational audit timeline
+```
+
+`VISUAL DEMO` is client-side presentation only and performs **no hardware writes and no ticket commit**. The deterministic URL form used by browser CI is:
+
+```text
+/operator.html?demo=1&phase=WEIGHING&hold=1
+```
+
+Production requires no Node.js. Node is used only by CI for JavaScript syntax validation.
 
 ## Design truth
 
@@ -54,6 +81,7 @@ Local durable commit: required before EXIT_AUTHORIZED.
 Central/WAN: never part of local truck-release authorization.
 Physical barrier anti-collision/safety: independent of the application process.
 Restart: SafeState first, new engine IDLE, never replay stale permissive command.
+UI: visualization only; browser state never authorizes a physical action.
 ```
 
 ## Code map
@@ -75,7 +103,7 @@ internal/adapters/
   registry/               bootstrap RFID -> plate map
 
 internal/runtimeio/       safe-start poller + desired-output reconciler + audit gate
-internal/httpapi/         embedded HTTP API + UI
+internal/httpapi/         embedded HTTP API + animated operator UI
 ```
 
 ## Truck workflow
@@ -190,10 +218,13 @@ full truck cycle -> 28460 kg -> SQLite commit -> COMPLETE
 SQLite tickets=1 + pending_sync=1 + integrity=ok
 process stop + reopen same edge.db
 reboot state IDLE + durable ticket/queue retained + no I/O replay
+JavaScript syntax validation
+embedded operator assets served by the EXE
+Chromium executes deterministic operator-demo DOM
 artifact SHA-256
 ```
 
-Test simulators are not shipped in the production artifact.
+Test simulators and Node.js are not shipped in the production artifact.
 
 ## Status
 
@@ -204,13 +235,14 @@ Phase 1A  all-frame raw-weight audit                      DONE
 Phase 2   audited Go truck workflow engine                DONE
 Phase 2B  Modbus poller + output reconciler               DONE
 Phase 2C  operational/action audit + permissive gate      DONE
-Phase 3   pure-Go SQLite local durability                 IN VERIFICATION
-Phase 4   exact scale-controller vendor adapter           NEED REAL PROTOCOL
-Phase 5   real remote-I/O bench integration               NEED HARDWARE
-Phase 6   real RFID/LPR integration                       NEED DEVICE API
-Phase 7   production shadow mode                          SITE STEP
-Phase 8   supervised physical outputs                     SITE STEP
-Phase 9   Go primary / C# retired                         SITE CUTOVER
+Phase 3   pure-Go SQLite local durability                 DONE
+Phase 4   embedded animated operator digital twin         IN FINAL CI
+Phase 5   exact scale-controller vendor adapter           NEED REAL PROTOCOL
+Phase 6   real remote-I/O bench integration               NEED HARDWARE
+Phase 7   real RFID/LPR integration                       NEED DEVICE API
+Phase 8   production shadow mode                          SITE STEP
+Phase 9   supervised physical outputs                     SITE STEP
+Phase 10  Go primary / C# retired                         SITE CUTOVER
 ```
 
-The remaining items after Phase 3 require the actual scale-controller protocol and physical devices/site commissioning; they cannot be truthfully completed in simulation alone.
+Software simulation/CI can validate the Edge runtime, persistence, audit, workflow, browser UI and Modbus behavior. Exact vendor protocol and physical site commissioning remain hardware-bound and must not be represented as completed without the actual devices/protocol evidence.
