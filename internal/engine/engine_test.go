@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -44,18 +45,30 @@ func (s *fakeTicketStore) latest() domain.Ticket {
 
 func newTestEngine(store *fakeTicketStore) *Engine {
 	return New(Config{
-		StationID: "S01", MinStableWeightKG: 1000,
+		StationID: "S01", EmptyScaleMaxKG: 200, MinStableWeightKG: 1000,
 		StableConfirmations: 2, StableToleranceKG: 20,
 	}, store, fakeRegistry{vehicles: map[string]domain.VehicleIdentity{
 		"RFID-1": {RFIDTag: "RFID-1", Plate: "15C-123.45"},
 	}})
 }
 
+func audited(weight int64, stable bool, seq uint64, at time.Time) domain.AuditedScaleReading {
+	return domain.AuditedScaleReading{
+		Reading: domain.ScaleReading{WeightKG: weight, Stable: stable, Health: domain.HealthHealthy, Observed: at},
+		RawRef: domain.RawWeightRef{Seq: seq, Hash: fmt.Sprintf("hash-%d", seq)},
+	}
+}
+
 func beginIdentifiedTruck(t *testing.T, e *Engine) time.Time {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := e.ObservePosition(ctx, domain.PositionSnapshot{EntryPresent: true, SafetyClear: true, Observed: now}); err != nil {
+	// Entry authorization requires two independent empty-deck signals:
+	// position sensors clear + an audited stable near-zero controller reading.
+	if err := e.ObserveScale(ctx, audited(0, true, 1, now)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ObservePosition(ctx, domain.PositionSnapshot{EntryPresent: true, SafetyClear: true, Observed: now.Add(time.Millisecond)}); err != nil {
 		t.Fatal(err)
 	}
 	start := e.Snapshot().Transaction.StartedAt
@@ -74,13 +87,6 @@ func beginIdentifiedTruck(t *testing.T, e *Engine) time.Time {
 		t.Fatalf("entry outputs not authorized: %+v", s.Transaction.Outputs)
 	}
 	return at
-}
-
-func audited(weight int64, stable bool, seq uint64, at time.Time) domain.AuditedScaleReading {
-	return domain.AuditedScaleReading{
-		Reading: domain.ScaleReading{WeightKG: weight, Stable: stable, Health: domain.HealthHealthy, Observed: at},
-		RawRef: domain.RawWeightRef{Seq: seq, Hash: "hash-" + string(rune('0'+seq))},
-	}
 }
 
 func TestHappyPathCommitsTicketWithExactRawWeightRef(t *testing.T) {
@@ -137,6 +143,31 @@ func TestHappyPathCommitsTicketWithExactRawWeightRef(t *testing.T) {
 	}
 }
 
+func TestEntryBlockedWithoutAuditedStableEmptyScale(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(&fakeTicketStore{})
+	now := time.Now().UTC()
+	_ = e.ObservePosition(ctx, domain.PositionSnapshot{EntryPresent: true, SafetyClear: true, Observed: now})
+	at := e.Snapshot().Transaction.StartedAt.Add(time.Millisecond)
+	_ = e.ObserveRFID(ctx, domain.RFIDObservation{Tag: "RFID-1", Health: domain.HealthHealthy, Observed: at})
+	_ = e.ObserveLPR(ctx, domain.LPRObservation{Plate: "15C-123.45", Health: domain.HealthHealthy, Observed: at.Add(time.Millisecond)})
+	if got := e.Snapshot().State; got == domain.StateEntryAuthorized {
+		t.Fatal("entry must not open without audited stable empty-scale proof")
+	}
+	if err := e.ObserveScale(ctx, audited(800, true, 2, at.Add(2*time.Millisecond))); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.Snapshot().State; got == domain.StateEntryAuthorized {
+		t.Fatal("entry must remain blocked while scale carries material/vehicle weight")
+	}
+	if err := e.ObserveScale(ctx, audited(0, true, 3, at.Add(3*time.Millisecond))); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.Snapshot().State; got != domain.StateEntryAuthorized {
+		t.Fatalf("state=%s want ENTRY_AUTHORIZED after audited stable zero", got)
+	}
+}
+
 func TestWorkflowRejectsBareUnauditedScaleReading(t *testing.T) {
 	store := &fakeTicketStore{}
 	e := newTestEngine(store)
@@ -152,7 +183,8 @@ func TestIdentityMismatchBlocksEntry(t *testing.T) {
 	ctx := context.Background()
 	e := newTestEngine(&fakeTicketStore{})
 	now := time.Now().UTC()
-	_ = e.ObservePosition(ctx, domain.PositionSnapshot{EntryPresent: true, SafetyClear: true, Observed: now})
+	_ = e.ObserveScale(ctx, audited(0, true, 1, now))
+	_ = e.ObservePosition(ctx, domain.PositionSnapshot{EntryPresent: true, SafetyClear: true, Observed: now.Add(time.Millisecond)})
 	at := e.Snapshot().Transaction.StartedAt.Add(time.Millisecond)
 	_ = e.ObserveRFID(ctx, domain.RFIDObservation{Tag: "RFID-1", Health: domain.HealthHealthy, Observed: at})
 	_ = e.ObserveLPR(ctx, domain.LPRObservation{Plate: "15C-999.99", Health: domain.HealthHealthy, Observed: at.Add(time.Millisecond)})
