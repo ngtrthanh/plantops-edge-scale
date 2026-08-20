@@ -5,28 +5,78 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/ingress"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/rawjournal"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/scaleascii"
 )
 
 //go:embed web/*
 var webFS embed.FS
 
 type Server struct {
-	RFID    *ingress.RFID
-	LPR     *ingress.LPR
-	Version string
-	GitSHA  string
+	RFID         *ingress.RFID
+	LPR          *ingress.LPR
+	WeightAudit  *rawjournal.Journal
+	ScaleMonitor *scaleascii.Monitor
+	Version      string
+	GitSHA       string
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
+		payload := map[string]any{
 			"status": "ok", "service": "plantops-edge-scale-go", "version": s.Version,
 			"git_sha": s.GitSHA, "utc": time.Now().UTC(),
-		})
+		}
+		if s.ScaleMonitor != nil {
+			payload["scale"] = s.ScaleMonitor.Snapshot()
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("GET /api/scale/status", func(w http.ResponseWriter, _ *http.Request) {
+		if s.ScaleMonitor == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.ScaleMonitor.Snapshot())
+	})
+	mux.HandleFunc("GET /api/audit/weights", func(w http.ResponseWriter, r *http.Request) {
+		if s.WeightAudit == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "raw weight audit not configured"})
+			return
+		}
+		limit := 200
+		if raw := r.URL.Query().Get("limit"); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil {
+				limit = n
+			}
+		}
+		records, err := s.WeightAudit.Tail(limit)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, records)
+	})
+	mux.HandleFunc("GET /api/audit/weights/verify", func(w http.ResponseWriter, _ *http.Request) {
+		if s.WeightAudit == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "raw weight audit not configured"})
+			return
+		}
+		if err := s.WeightAudit.Verify(); err != nil {
+			if os.IsNotExist(err) {
+				writeJSON(w, http.StatusOK, map[string]any{"status": "empty", "verified": true})
+				return
+			}
+			writeJSON(w, http.StatusConflict, map[string]any{"status": "invalid", "verified": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "verified": true})
 	})
 	mux.HandleFunc("GET /api/identity", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"rfid": s.RFID.Latest(), "lpr": s.LPR.Latest()})
