@@ -73,14 +73,15 @@ jobs:
 
             $audited = $false
             for ($i=0; $i -lt 30; $i++) {
-              $records = @(Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=20')
-              $frames = @($records | Where-Object { $_.event.kind -eq 'FRAME' })
-              if ($frames.Count -ge 3) { $audited = $true; break }
+              $audit = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=20'
+              $frames = @($audit.records | Where-Object { $_.event.kind -eq 'FRAME' })
+              if ($audit.count -ge 3 -and $frames.Count -ge 3) { $audited = $true; break }
               Start-Sleep -Milliseconds 200
             }
             if (-not $audited) {
               $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status
               Write-Host "Scale status: $($scale | ConvertTo-Json -Depth 5 -Compress)"
+              Write-Host "Audit response: $($audit | ConvertTo-Json -Depth 8 -Compress)"
               if (Test-Path $auditPath) { Get-Content $auditPath }
               Get-Content $simOut -ErrorAction SilentlyContinue
               Get-Content $simErr -ErrorAction SilentlyContinue
