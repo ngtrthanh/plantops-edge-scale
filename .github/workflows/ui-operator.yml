@@ -114,3 +114,6 @@ jobs:
             out/plantops-edge-scale.exe
             out/plantops-edge-scale.exe.sha256
             out/operator-ui-rendered.html
+            internal/httpapi/web/operator.html
+            internal/httpapi/web/operator.css
+            internal/httpapi/web/operator.js
