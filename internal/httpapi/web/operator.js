@@ -3,7 +3,7 @@ const PHASES=['IDLE','APPROACH','IDENTIFYING','ENTRY_AUTHORIZED','ENTERING','POS
 const STEP_COPY={IDLE:'Deck clear; waiting for vehicle',APPROACH:'Vehicle detected at approach',IDENTIFYING:'RFID + plate identity acquisition',ENTRY_AUTHORIZED:'Identity and empty-deck proof accepted',ENTERING:'Entry barrier released; truck entering',POSITIONING:'Front/rear deck sensors evaluated',READY_TO_WEIGH:'Truck positioned and interlocks satisfied',WEIGHING:'Controller frames audited; stability evaluated',LOCAL_COMMITTED:'Ticket durably committed locally',EXIT_AUTHORIZED:'Exit release authorized after commit',EXITING:'Truck clearing weighbridge',COMPLETE:'Transaction complete; permissive outputs off'};
 const POS={IDLE:1,APPROACH:7,IDENTIFYING:13,ENTRY_AUTHORIZED:18,ENTERING:29,POSITIONING:43,READY_TO_WEIGH:48,WEIGHING:50,LOCAL_COMMITTED:53,EXIT_AUTHORIZED:63,EXITING:79,COMPLETE:94,FAULT_LOCKOUT:50};
 const $=id=>document.getElementById(id);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let live=true,lastLpr='',demoTimer=null;
 let data={health:null,wf:null,scale:null,io:null,id:null,storage:null,weights:[],events:[]};
 function fmtN(n){return new Intl.NumberFormat('en-US').format(Number(n||0))}
