@@ -45,10 +45,11 @@ LIVE
 └── operational audit timeline
 ```
 
-`VISUAL DEMO` is client-side presentation only and performs **no hardware writes and no ticket commit**. The deterministic URL form used by browser CI is:
+`VISUAL DEMO` is client-side presentation only and performs **no hardware writes and no ticket commit**.
 
 ```text
-/operator.html?demo=1&phase=WEIGHING&hold=1
+/operator.html?demo=1          animated demo from IDLE
+/operator.html?demo=WEIGHING   deterministic held WEIGHING frame for browser CI/preview
 ```
 
 Production requires no Node.js. Node is used only by CI for JavaScript syntax validation.
@@ -236,7 +237,7 @@ Phase 2   audited Go truck workflow engine                DONE
 Phase 2B  Modbus poller + output reconciler               DONE
 Phase 2C  operational/action audit + permissive gate      DONE
 Phase 3   pure-Go SQLite local durability                 DONE
-Phase 4   embedded animated operator digital twin         IN FINAL CI
+Phase 4   embedded animated operator digital twin         DONE
 Phase 5   exact scale-controller vendor adapter           NEED REAL PROTOCOL
 Phase 6   real remote-I/O bench integration               NEED HARDWARE
 Phase 7   real RFID/LPR integration                       NEED DEVICE API
@@ -245,4 +246,4 @@ Phase 9   supervised physical outputs                     SITE STEP
 Phase 10  Go primary / C# retired                         SITE CUTOVER
 ```
 
-Software simulation/CI can validate the Edge runtime, persistence, audit, workflow, browser UI and Modbus behavior. Exact vendor protocol and physical site commissioning remain hardware-bound and must not be represented as completed without the actual devices/protocol evidence.
+Software simulation/CI validates the Edge runtime, persistence, audit, workflow, browser UI and Modbus behavior. Exact vendor protocol and physical site commissioning remain hardware-bound and must not be represented as completed without the actual devices/protocol evidence.
