@@ -2,80 +2,80 @@
 
 Offline-first unmanned truck weighbridge Edge controller.
 
-## Target runtime
-
-**Go single binary**:
+## Runtime
 
 ```text
 Windows
 └── plantops-edge-scale.exe
     ├── embedded HTTP/API + operator UI
-    ├── audited truck workflow state engine
+    ├── deterministic audited truck workflow
     ├── scale / Modbus / RFID / LPR adapters
-    ├── local durable ticket + audit persistence
-    └── later Central sync
+    ├── embedded pure-Go SQLite business persistence
+    └── durable local audit + Central sync queue
 ```
 
-No IIS, Docker Desktop, WSL2, Node runtime, or .NET runtime dependency.
+Production target: **one Go EXE**. No IIS, Docker Desktop, WSL2, Node, .NET runtime, PostgreSQL service, CGO, or SQLite DLL.
 
-The C# implementation remains only as a temporary behavioral reference during migration.
+Persistent files:
+
+```text
+data/edge.db             tickets + overrides + sync queue + station state
+ data/raw-weight.jsonl   all controller frames / exact bytes / hash chain
+ data/events.jsonl       decisions + overrides + faults + output command/result hash chain
+```
+
+The independent audit journals are intentional: forensic evidence remains directly inspectable and hash-verifiable even if relational storage is unavailable.
 
 ## Design truth
 
 - `docs/EDGE-KNOWLEDGE.md` — operating modes, overrides, lockout and safety rules.
 - `docs/PSEUDOCODE.md` — whole-repo behavior.
-- `docs/RAW-WEIGHT-AUDIT.md` — mandatory all-frame scale audit.
-- `docs/HARDWARE-WIRING.md` — physical topology and commissioning plan.
-- `docs/MODBUS-RUNTIME.md` — Phase 2B polling/reconciliation and safe-start semantics.
-- `docs/GO-PORTING.md` — staged C# → Go cutover.
+- `docs/RAW-WEIGHT-AUDIT.md` — all-frame scale audit.
+- `docs/EVENT-AUDIT.md` — operational/action audit gate.
+- `docs/HARDWARE-WIRING.md` — topology and commissioning plan.
+- `docs/MODBUS-RUNTIME.md` — Modbus polling/reconciliation and safe-start semantics.
+- `docs/SQLITE-PERSISTENCE.md` — SQLite durability, recovery and sync queue contract.
+- `docs/GO-PORTING.md` — C# → Go cutover record.
 
 ## Non-negotiable rules
 
 ```text
 Scale weight/stable/fault authority: NEVER software-overridden.
-Every scale frame: durably journal exact raw bytes + UTC before business use.
-Ticket accepted weight: stores exact raw audit seq/hash reference.
+Every scale frame: exact bytes + Edge UTC durably journaled before business use.
+Accepted ticket: stores exact raw audit seq/hash.
 Raw audit failure: reading cannot become ticket truth.
-Entry: requires RFID/LPR identity, physical safety, clear position sensors,
-       and audited HEALTHY + STABLE near-zero scale proof.
-Auxiliary override: transaction-scoped only.
-Multiple correlated failures: MANUAL/supervisor path.
+Permissive physical output: durable event intent before Modbus execution.
+Audit failure: permissive action blocked; safe/off action remains allowed.
+Entry: identity + physical safety + clear deck + audited stable near-zero scale.
+Auxiliary override: transaction-scoped evidence only.
 Critical/unsafe failure: FAULT_LOCKOUT.
-Local durable ticket commit: required before truck release.
-Central/WAN: never part of local release authorization.
-Physical barrier anti-collision/safety: independent of application process.
+Ticket + override + sync queue: one local SQLite transaction.
+Local durable commit: required before EXIT_AUTHORIZED.
+Central/WAN: never part of local truck-release authorization.
+Physical barrier anti-collision/safety: independent of the application process.
+Restart: SafeState first, new engine IDLE, never replay stale permissive command.
 ```
 
-## Implemented Go architecture
+## Code map
 
 ```text
 cmd/edge/main.go
 
-internal/domain/
-  health / modes / faults / overrides
-  workflow state / desired outputs
-  audited scale reading + raw reference
-
-internal/engine/
-  deterministic truck workflow
+internal/domain/          workflow/audit/fault/override contracts
+internal/engine/          deterministic truck state machine
+internal/workflowaudit/   synchronous before/after operational audit recorder
 
 internal/adapters/
-  scaleascii/     persistent audited scale TCP stream
-  rawjournal/     append-only SHA-256 chained raw weight journal
-  modbustcp/      dependency-free Modbus TCP DI/coil adapter
-  ingress/        RFID + LPR normalized ingress
-  registry/       bootstrap RFID -> plate map
-  jsonl/          durable bootstrap ticket store
+  scaleascii/             persistent scale TCP collector/parser boundary
+  rawjournal/             all-frame raw-weight SHA-256 chain
+  auditjournal/           operational SHA-256 chain
+  sqlitestore/            edge.db TicketStore + sync queue + integrity/recovery
+  modbustcp/              dependency-free Modbus TCP DI/coil adapter
+  ingress/                RFID/LPR normalized ingress
+  registry/               bootstrap RFID -> plate map
 
-internal/runtimeio/
-  Modbus input poller
-  safe-start/reconnect output reconciler
-  barrier-feedback GREEN gating
-  bounded buzzer pulse
-  remote-I/O/barrier fault reporting
-
-internal/httpapi/
-  embedded HTTP API + UI
+internal/runtimeio/       safe-start poller + desired-output reconciler + audit gate
+internal/httpapi/         embedded HTTP API + UI
 ```
 
 ## Truck workflow
@@ -99,39 +99,20 @@ Critical failure can transition the active transaction to `FAULT_LOCKOUT` at any
 
 ## Run
 
-Development:
-
-```bash
-go test ./...
-go vet ./...
-go run ./cmd/edge
-```
-
-Scale-only example:
-
 ```text
 plantops-edge-scale.exe \
   -station-id WHD-NC \
-  -scale-addr 192.168.1.50:4001 \
-  -raw-weight-journal data/raw-weight.jsonl \
-  -vehicle-map "RFID001=15C-123.45"
-```
-
-Scale + remote I/O example:
-
-```text
-plantops-edge-scale.exe \
-  -station-id WHD-NC \
+  -db data/edge.db \
   -scale-addr 192.168.1.50:4001 \
   -io-addr 192.168.1.60:502 \
   -io-unit-id 1 \
   -io-map "safety_clear=8" \
   -raw-weight-journal data/raw-weight.jsonl \
-  -ticket-journal data/tickets.jsonl \
+  -event-journal data/events.jsonl \
   -vehicle-map "RFID001=15C-123.45"
 ```
 
-`-io-addr` empty means no physical Modbus reads or writes.
+`-io-addr` empty means no physical Modbus reads/writes. `/sim/*` exists only with explicit `-simulation`.
 
 ## APIs
 
@@ -140,87 +121,96 @@ GET  /healthz
 GET  /api/workflow
 GET  /api/scale/status
 GET  /api/io/status
+GET  /api/storage/status
 GET  /api/identity
 GET  /api/audit/weights?limit=200
 GET  /api/audit/weights/verify
+GET  /api/audit/events?limit=200
+GET  /api/audit/events/verify
 POST /io/rfid
 POST /io/lpr
 ```
 
-`/sim/*` endpoints exist only when the process is started with explicit `-simulation`.
-
-## Raw weight audit
+## Evidence path
 
 ```text
-controller frame
-→ exact bytes + Edge UTC timestamp
-→ fsync append-only hash-chain journal
-→ parse/normalize
-→ AuditedScaleReading{reading, raw_seq, raw_hash}
-→ workflow
-→ durable ticket stores accepted raw_seq/raw_hash
+controller frame bytes
+→ raw-weight fsync + seq/hash
+→ AuditedScaleReading
+→ workflow stable acceptance
+→ SQLite atomic ticket commit
+   ├── ticket exact raw seq/hash
+   ├── override evidence
+   ├── station pointer
+   └── pending Central sync item
+→ EXIT_AUTHORIZED
 ```
 
-Therefore an accepted ticket can be traced directly back to the exact controller frame and the complete raw weight curve around that transaction.
-
-## Remote-I/O runtime safety
+Physical output path:
 
 ```text
-connect/read remote I/O
-→ force SafeState first
-   RED, GREEN off, buzzer off, OPEN requests off
-→ then reconcile Engine DesiredOutputs
+Engine DesiredOutputs
+→ runtime reconciler
+→ durable OUTPUT_COMMAND intent
+→ Modbus command
+→ physical feedback
+→ OUTPUT_RESULT audit
 ```
 
-A reconnect never blindly replays stale barrier commands.
+GREEN is physically feedback-gated and only illuminates after barrier OPEN feedback.
 
-Permissive GREEN is feedback-gated:
+## SQLite policy
 
 ```text
-Engine authorizes OPEN + GREEN
-→ OPEN_REQUEST coil
-→ wait physical OPEN feedback
-→ GREEN ON
+WAL
+synchronous=FULL
+foreign_keys=ON
+busy_timeout=5000
+startup integrity_check
+single database/sql connection
 ```
 
-Remote-I/O transport failure or contradictory/timeout barrier feedback is a critical fault.
+Central outage leaves `sync_queue` pending but does not block a valid local transaction.
 
-## CI
+## Windows CI acceptance
 
-GitHub-hosted Windows CI verifies:
+GitHub-hosted Windows CI runs:
 
 ```text
+go mod tidy
 go test ./...
 go vet ./...
-single plantops-edge-scale.exe build
-raw-weight TCP simulator
-all-frame audit + hash chain
-full audited transaction
-exact ticket -> raw frame linkage
-Modbus TCP I/O simulator
-ENTRY sensor -> barrier request -> OPEN feedback -> GREEN
-FRONT/REAR position -> audited stable weight -> durable ticket
-EXIT barrier -> feedback -> exit sensor -> COMPLETE
-no permissive applied outputs after completion
+single EXE build
+TCP scale simulator
+all-frame raw audit + exact ticket linkage
+operational hash-chain audit
+Modbus TCP remote-I/O simulator
+barrier request -> OPEN feedback -> GREEN
+full truck cycle -> 28460 kg -> SQLite commit -> COMPLETE
+SQLite tickets=1 + pending_sync=1 + integrity=ok
+process stop + reopen same edge.db
+reboot state IDLE + durable ticket/queue retained + no I/O replay
 artifact SHA-256
 ```
 
-Test simulators are never shipped in the production artifact.
+Test simulators are not shipped in the production artifact.
 
-## Migration status
+## Status
 
 ```text
 Phase 0   C# behavioral reference                         DONE
-Phase 1   Go skeleton + adapter boundaries                DONE
-Phase 1A  all-frame raw weight audit                      DONE
-Phase 2   audited Go truck workflow state engine          DONE
-Phase 2B  Modbus input poller + output reconciler         IN VERIFICATION
-Phase 2C  general event/action audit journal              NEXT
-Phase 3   SQLite single-file persistence                  NEXT
-Phase 4   exact real scale-controller adapter             NEED REAL PROTOCOL
-Phase 5   real remote-I/O bench integration               PLANNED
-Phase 6   real RFID/LPR integration                       PLANNED
-Phase 7   production shadow mode                          PLANNED
-Phase 8   supervised outputs                              PLANNED
-Phase 9   Go primary / C# retired                         PLANNED
+Phase 1   Go skeleton + hardware boundaries               DONE
+Phase 1A  all-frame raw-weight audit                      DONE
+Phase 2   audited Go truck workflow engine                DONE
+Phase 2B  Modbus poller + output reconciler               DONE
+Phase 2C  operational/action audit + permissive gate      DONE
+Phase 3   pure-Go SQLite local durability                 IN VERIFICATION
+Phase 4   exact scale-controller vendor adapter           NEED REAL PROTOCOL
+Phase 5   real remote-I/O bench integration               NEED HARDWARE
+Phase 6   real RFID/LPR integration                       NEED DEVICE API
+Phase 7   production shadow mode                          SITE STEP
+Phase 8   supervised physical outputs                     SITE STEP
+Phase 9   Go primary / C# retired                         SITE CUTOVER
 ```
+
+The remaining items after Phase 3 require the actual scale-controller protocol and physical devices/site commissioning; they cannot be truthfully completed in simulation alone.
