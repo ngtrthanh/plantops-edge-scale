@@ -94,6 +94,70 @@ func (j *Journal) Append(ctx context.Context, event domain.RawWeightEvent) error
 	return nil
 }
 
+// Tail returns the newest audit records in chronological order. It is a
+// bootstrap replay helper for the operator/audit API. SQLite will later provide
+// indexed time/transaction queries without changing Record semantics.
+func (j *Journal) Tail(limit int) ([]Record, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+	if j.Path == "" {
+		return nil, errors.New("raw weight journal path is empty")
+	}
+
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	f, err := os.Open(j.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Record{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	ring := make([]Record, limit)
+	count := 0
+	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for s.Scan() {
+		if len(s.Bytes()) == 0 {
+			continue
+		}
+		var record Record
+		if err := json.Unmarshal(s.Bytes(), &record); err != nil {
+			return nil, err
+		}
+		ring[count%limit] = record
+		count++
+	}
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return []Record{}, nil
+	}
+
+	n := count
+	if n > limit {
+		n = limit
+	}
+	out := make([]Record, 0, n)
+	start := count - n
+	for i := start; i < count; i++ {
+		out = append(out, ring[i%limit])
+	}
+	return out, nil
+}
+
+func (j *Journal) Verify() error {
+	return Verify(j.Path)
+}
+
 func (j *Journal) loadTail() error {
 	j.initialized = true
 	f, err := os.Open(j.Path)
