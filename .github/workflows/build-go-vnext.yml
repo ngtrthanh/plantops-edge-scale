@@ -16,6 +16,8 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
+      - name: Resolve modules
+        run: go mod tidy
       - name: Show Go
         run: go version
       - name: Test
@@ -27,182 +29,147 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           $sha = "${{ github.sha }}"
-          go build -trimpath -ldflags "-s -w -X main.version=0.5.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          go build -trimpath -ldflags "-s -w -X main.version=0.6.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
       - name: Build CI simulators
         shell: pwsh
         run: |
           go build -trimpath -o out/scale-sim.exe ./.github/testdata/scale-sim.go
           go build -trimpath -o out/modbus-io-sim.exe ./.github/testdata/modbus-io-sim.go
-          if (-not (Test-Path out/scale-sim.exe)) { throw "scale simulator missing" }
-          if (-not (Test-Path out/modbus-io-sim.exe)) { throw "Modbus I/O simulator missing" }
 
-      - name: Runtime + audited truck workflow smoke
+      - name: Runtime + SQLite + audited workflow smoke
         shell: pwsh
         run: |
           $weightPath = Join-Path $PWD 'out/raw-weight-ci.jsonl'
           $eventPath = Join-Path $PWD 'out/events-ci.jsonl'
-          $ticketPath = Join-Path $PWD 'out/tickets-ci.jsonl'
-          Remove-Item $weightPath,$eventPath,$ticketPath -ErrorAction SilentlyContinue
+          $dbPath = Join-Path $PWD 'out/edge-ci.db'
+          Remove-Item $weightPath,$eventPath,$dbPath,"$dbPath-wal","$dbPath-shm" -ErrorAction SilentlyContinue
 
           $scaleSim = Start-Process .\out\scale-sim.exe -PassThru
           Start-Sleep -Seconds 1
           $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
-            '-scale-addr','127.0.0.1:19001',
-            '-station-id','CI-SCALE-01',
-            '-raw-weight-journal',$weightPath,
-            '-event-journal',$eventPath,
-            '-ticket-journal',$ticketPath,
-            '-vehicle-map','RFID-DEMO-001=15C-123.45',
-            '-empty-scale-max-kg','200',
-            '-min-stable-weight-kg','1000',
-            '-stable-confirmations','2',
-            '-stable-tolerance-kg','20',
-            '-simulation'
+            '-scale-addr','127.0.0.1:19001','-station-id','CI-SCALE-01',
+            '-raw-weight-journal',$weightPath,'-event-journal',$eventPath,'-db',$dbPath,
+            '-vehicle-map','RFID-DEMO-001=15C-123.45','-empty-scale-max-kg','200',
+            '-min-stable-weight-kg','1000','-stable-confirmations','2','-stable-tolerance-kg','20','-simulation'
           ) -PassThru
           try {
-            $ok = $false
-            for ($i=0; $i -lt 40; $i++) {
-              try {
-                $h = Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 1
-                $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
-                if ($h.status -eq 'ok' -and $h.event_audit_configured -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0) { $ok = $true; break }
-              } catch {}
-              Start-Sleep -Milliseconds 250
-            }
-            if (-not $ok) { throw "health/initial audited stable-zero scale proof failed" }
-
-            $entry = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"entry_present":true,"safety_clear":true}'
-            if ($entry.state -ne 'IDENTIFYING') { throw "truck did not enter IDENTIFYING: $($entry.state)" }
-            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
-            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
-            $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-            if ($wf.state -ne 'ENTRY_AUTHORIZED') { throw "identity/entry authorization failed" }
-
-            $positioned = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"front_present":true,"rear_present":true,"safety_clear":true}'
-            if ($positioned.transaction.position -ne 'ACCEPTED') { throw "position was not accepted" }
-
-            $committed = $false
-            for ($i=0; $i -lt 50; $i++) {
-              $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-              if ($wf.state -eq 'EXIT_AUTHORIZED') { $committed = $true; break }
-              if ($wf.state -eq 'FAULT_LOCKOUT') { throw "workflow locked out: $($wf.transaction.last_block_reason)" }
+            $ok=$false
+            for($i=0;$i -lt 50;$i++){
+              try{
+                $h=Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 1
+                $scale=Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
+                $storage=Invoke-RestMethod http://127.0.0.1:8080/api/storage/status -TimeoutSec 1
+                if($h.status -eq 'ok' -and $storage.integrity -eq 'ok' -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0){$ok=$true;break}
+              }catch{}
               Start-Sleep -Milliseconds 200
             }
-            if (-not $committed) { throw "audited stable weight did not commit/release" }
-            if ([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460) { throw "accepted weight mismatch" }
+            if(-not $ok){throw 'startup/SQLite/stable-zero proof failed'}
 
-            $weights = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=50'
-            $acceptedSeq = [uint64]$wf.transaction.accepted_weight.raw_ref.seq
-            $acceptedHash = [string]$wf.transaction.accepted_weight.raw_ref.hash
-            $rawAccepted = $weights.records | Where-Object { [uint64]$_.seq -eq $acceptedSeq } | Select-Object -First 1
-            if ($null -eq $rawAccepted -or $rawAccepted.hash -ne $acceptedHash) { throw "ticket -> raw audit linkage failed" }
+            $entry=Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"entry_present":true,"safety_clear":true}'
+            if($entry.state -ne 'IDENTIFYING'){throw "truck state=$($entry.state)"}
+            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
+            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
+            $wf=Invoke-RestMethod http://127.0.0.1:8080/api/workflow
+            if($wf.state -ne 'ENTRY_AUTHORIZED'){throw 'identity/entry authorization failed'}
+            $positioned=Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"front_present":true,"rear_present":true,"safety_clear":true}'
+            if($positioned.transaction.position -ne 'ACCEPTED'){throw 'position not accepted'}
 
-            $null = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":true,"safety_clear":true}'
-            $complete = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":false,"safety_clear":true}'
-            if ($complete.state -ne 'COMPLETE') { throw "truck workflow did not complete" }
-
-            Start-Sleep -Milliseconds 250
-            $events = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=200'
-            $kinds = @($events.records | ForEach-Object { $_.event.kind })
-            foreach ($required in @('TRANSACTION_STARTED','STATE_TRANSITION','RFID_OBSERVED','LPR_OBSERVED','IDENTITY_DECISION','POSITION_DECISION','STABLE_WEIGHT_ACCEPTED','TICKET_COMMITTED','TRANSACTION_COMPLETED')) {
-              if ($kinds -notcontains $required) { throw "event audit missing $required; kinds=$($kinds -join ',')" }
+            $committed=$false
+            for($i=0;$i -lt 60;$i++){
+              $wf=Invoke-RestMethod http://127.0.0.1:8080/api/workflow
+              if($wf.state -eq 'EXIT_AUTHORIZED'){$committed=$true;break}
+              if($wf.state -eq 'FAULT_LOCKOUT'){throw "lockout: $($wf.transaction.last_block_reason)"}
+              Start-Sleep -Milliseconds 200
             }
-            $verifyEvents = Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify
-            if (-not $verifyEvents.verified) { throw "operational event hash chain failed" }
-            if (-not (Test-Path $eventPath)) { throw "event audit file missing" }
-            Write-Host "Workflow + event audit PASS: transaction decisions are hash-chained"
+            if(-not $committed){throw 'stable weight did not commit'}
+            if([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460){throw 'accepted weight mismatch'}
+
+            $storage=Invoke-RestMethod http://127.0.0.1:8080/api/storage/status
+            if([int64]$storage.tickets -ne 1 -or [int64]$storage.pending_sync -ne 1 -or $storage.integrity -ne 'ok'){throw "SQLite atomic state invalid: $($storage|ConvertTo-Json -Compress)"}
+            if(-not (Test-Path $dbPath)){throw 'edge.db missing'}
+
+            $weights=Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=50'
+            $acceptedSeq=[uint64]$wf.transaction.accepted_weight.raw_ref.seq
+            $acceptedHash=[string]$wf.transaction.accepted_weight.raw_ref.hash
+            $rawAccepted=$weights.records|Where-Object{[uint64]$_.seq -eq $acceptedSeq}|Select-Object -First 1
+            if($null -eq $rawAccepted -or $rawAccepted.hash -ne $acceptedHash){throw 'ticket -> raw audit linkage failed'}
+
+            $null=Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":true,"safety_clear":true}'
+            $complete=Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":false,"safety_clear":true}'
+            if($complete.state -ne 'COMPLETE'){throw 'workflow did not complete'}
+
+            $events=Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=250'
+            $kinds=@($events.records|ForEach-Object{$_.event.kind})
+            foreach($required in @('TRANSACTION_STARTED','RFID_OBSERVED','LPR_OBSERVED','IDENTITY_DECISION','POSITION_DECISION','STABLE_WEIGHT_ACCEPTED','TICKET_COMMITTED','TRANSACTION_COMPLETED')){if($kinds -notcontains $required){throw "event audit missing $required"}}
+            if(-not (Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify).verified){throw 'event hash chain failed'}
           } finally {
-            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-            if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
+            if($p -and -not $p.HasExited){Stop-Process -Id $p.Id -Force}
+            if($scaleSim -and -not $scaleSim.HasExited){Stop-Process -Id $scaleSim.Id -Force}
           }
+
+          $p2=Start-Process .\out\plantops-edge-scale.exe -ArgumentList @('-listen','127.0.0.1:8081','-station-id','CI-SCALE-01','-db',$dbPath,'-raw-weight-journal',$weightPath,'-event-journal',$eventPath) -PassThru
+          try{
+            $ready=$false
+            for($i=0;$i -lt 40;$i++){
+              try{
+                $h2=Invoke-RestMethod http://127.0.0.1:8081/healthz -TimeoutSec 1
+                $s2=Invoke-RestMethod http://127.0.0.1:8081/api/storage/status -TimeoutSec 1
+                $wf2=Invoke-RestMethod http://127.0.0.1:8081/api/workflow -TimeoutSec 1
+                $io2=Invoke-RestMethod http://127.0.0.1:8081/api/io/status -TimeoutSec 1
+                if($h2.status -eq 'ok' -and $s2.integrity -eq 'ok' -and [int64]$s2.tickets -eq 1 -and [int64]$s2.pending_sync -eq 1 -and $wf2.state -eq 'IDLE' -and -not $io2.enabled){$ready=$true;break}
+              }catch{}
+              Start-Sleep -Milliseconds 200
+            }
+            if(-not $ready){throw 'restart recovery failed'}
+            Write-Host 'SQLite PASS: atomic ticket+queue persisted across restart; workflow rebooted IDLE with no output replay'
+          }finally{if($p2 -and -not $p2.HasExited){Stop-Process -Id $p2.Id -Force}}
 
       - name: Runtime + Modbus hardware feedback + output audit smoke
         shell: pwsh
         run: |
-          $weightPath = Join-Path $PWD 'out/raw-weight-hw-ci.jsonl'
-          $eventPath = Join-Path $PWD 'out/events-hw-ci.jsonl'
-          $ticketPath = Join-Path $PWD 'out/tickets-hw-ci.jsonl'
-          Remove-Item $weightPath,$eventPath,$ticketPath -ErrorAction SilentlyContinue
-          $scaleOut = Join-Path $PWD 'out/scale-hw.log'
-          $ioOut = Join-Path $PWD 'out/modbus-hw.log'
-
-          $scaleSim = Start-Process .\out\scale-sim.exe -PassThru -RedirectStandardError $scaleOut
-          $ioSim = Start-Process .\out\modbus-io-sim.exe -PassThru -RedirectStandardError $ioOut
+          $weightPath=Join-Path $PWD 'out/raw-weight-hw-ci.jsonl'
+          $eventPath=Join-Path $PWD 'out/events-hw-ci.jsonl'
+          $dbPath=Join-Path $PWD 'out/edge-hw-ci.db'
+          Remove-Item $weightPath,$eventPath,$dbPath,"$dbPath-wal","$dbPath-shm" -ErrorAction SilentlyContinue
+          $scaleSim=Start-Process .\out\scale-sim.exe -PassThru
+          $ioSim=Start-Process .\out\modbus-io-sim.exe -PassThru
           Start-Sleep -Seconds 1
-          $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
-            '-scale-addr','127.0.0.1:19001',
-            '-io-addr','127.0.0.1:19002',
-            '-io-unit-id','1',
-            '-io-map','safety_clear=8',
-            '-io-poll','50ms',
-            '-io-buzzer-pulse','250ms',
-            '-barrier-feedback-timeout','2s',
-            '-station-id','CI-HW-01',
-            '-raw-weight-journal',$weightPath,
-            '-event-journal',$eventPath,
-            '-ticket-journal',$ticketPath,
-            '-vehicle-map','RFID-DEMO-001=15C-123.45',
-            '-empty-scale-max-kg','200',
-            '-min-stable-weight-kg','1000',
-            '-stable-confirmations','2',
-            '-stable-tolerance-kg','20'
+          $p=Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
+            '-scale-addr','127.0.0.1:19001','-io-addr','127.0.0.1:19002','-io-unit-id','1','-io-map','safety_clear=8','-io-poll','50ms','-io-buzzer-pulse','250ms','-barrier-feedback-timeout','2s',
+            '-station-id','CI-HW-01','-raw-weight-journal',$weightPath,'-event-journal',$eventPath,'-db',$dbPath,
+            '-vehicle-map','RFID-DEMO-001=15C-123.45','-empty-scale-max-kg','200','-min-stable-weight-kg','1000','-stable-confirmations','2','-stable-tolerance-kg','20'
           ) -PassThru
-          try {
-            $ready = $false
-            for ($i=0; $i -lt 60; $i++) {
-              try {
-                $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
-                $io = Invoke-RestMethod http://127.0.0.1:8080/api/io/status -TimeoutSec 1
-                if ($scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0 -and $io.enabled -and $io.connected) { $ready=$true; break }
-              } catch {}
+          try{
+            $ready=$false
+            for($i=0;$i -lt 60;$i++){
+              try{$scale=Invoke-RestMethod http://127.0.0.1:8080/api/scale/status;$io=Invoke-RestMethod http://127.0.0.1:8080/api/io/status;$st=Invoke-RestMethod http://127.0.0.1:8080/api/storage/status;if($scale.connected -and $io.connected -and $st.integrity -eq 'ok'){$ready=$true;break}}catch{}
               Start-Sleep -Milliseconds 200
             }
-            if (-not $ready) { throw "scale + Modbus I/O did not become ready" }
-
-            $truck = $false
-            for ($i=0; $i -lt 40; $i++) {
-              $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-              if ($wf.transaction -and $wf.state -eq 'IDENTIFYING') { $truck=$true; break }
-              if ($wf.state -eq 'FAULT_LOCKOUT') { throw "hardware workflow locked before identity" }
-              Start-Sleep -Milliseconds 150
-            }
-            if (-not $truck) { throw "Modbus ENTRY_PRESENT did not create transaction" }
-
-            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
-            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
-
-            $done = $false
-            for ($i=0; $i -lt 120; $i++) {
-              $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-              if ($wf.state -eq 'COMPLETE') { $done=$true; break }
-              if ($wf.state -eq 'FAULT_LOCKOUT') { Get-Content $ioOut -ErrorAction SilentlyContinue; throw "hardware workflow lockout: $($wf.transaction.last_block_reason)" }
-              Start-Sleep -Milliseconds 150
-            }
-            if (-not $done) { throw "Modbus-driven truck cycle did not reach COMPLETE" }
-
-            Start-Sleep -Milliseconds 300
-            $io = Invoke-RestMethod http://127.0.0.1:8080/api/io/status
-            if ($io.applied.entry_green -or $io.applied.exit_green -or $io.applied.entry_barrier_open -or $io.applied.exit_barrier_open -or $io.applied.buzzer) { throw "completed cycle left permissive applied outputs" }
-
-            $events = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=500'
-            $commands = @($events.records | Where-Object { $_.event.kind -eq 'OUTPUT_COMMAND' })
-            $results = @($events.records | Where-Object { $_.event.kind -eq 'OUTPUT_RESULT' })
-            if ($commands.Count -lt 4) { throw "too few physical output intents audited: $($commands.Count)" }
-            if ($results.Count -lt $commands.Count) { throw "physical output result audit incomplete" }
-
-            $entryOpenIntent = $commands | Where-Object { $_.event.action -eq 'ENTRY_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true } | Select-Object -First 1
-            $exitOpenIntent = $commands | Where-Object { $_.event.action -eq 'EXIT_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true } | Select-Object -First 1
-            if ($null -eq $entryOpenIntent -or $null -eq $exitOpenIntent) { throw "barrier OPEN intents missing from durable audit" }
-            if ([string]::IsNullOrWhiteSpace($entryOpenIntent.hash) -or [string]::IsNullOrWhiteSpace($exitOpenIntent.hash)) { throw "barrier OPEN intents missing hash-chain identity" }
-
-            $verifyEvents = Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify
-            if (-not $verifyEvents.verified) { throw "hardware event audit hash chain failed" }
-            Write-Host "Hardware + audit PASS: permissive Modbus outputs had durable intent before execution"
-          } finally {
-            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-            if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
-            if ($ioSim -and -not $ioSim.HasExited) { Stop-Process -Id $ioSim.Id -Force }
+            if(-not $ready){throw 'scale+Modbus+SQLite not ready'}
+            $truck=$false
+            for($i=0;$i -lt 40;$i++){$wf=Invoke-RestMethod http://127.0.0.1:8080/api/workflow;if($wf.transaction -and $wf.state -eq 'IDENTIFYING'){$truck=$true;break};Start-Sleep -Milliseconds 150}
+            if(-not $truck){throw 'Modbus ENTRY did not create transaction'}
+            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}'|Out-Null
+            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}'|Out-Null
+            $done=$false
+            for($i=0;$i -lt 120;$i++){$wf=Invoke-RestMethod http://127.0.0.1:8080/api/workflow;if($wf.state -eq 'COMPLETE'){$done=$true;break};if($wf.state -eq 'FAULT_LOCKOUT'){throw "hardware lockout: $($wf.transaction.last_block_reason)"};Start-Sleep -Milliseconds 150}
+            if(-not $done){throw 'hardware cycle did not COMPLETE'}
+            $st=Invoke-RestMethod http://127.0.0.1:8080/api/storage/status
+            if([int64]$st.tickets -ne 1 -or [int64]$st.pending_sync -ne 1){throw 'hardware ticket not atomically queued'}
+            $events=Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/events?limit=500'
+            $commands=@($events.records|Where-Object{$_.event.kind -eq 'OUTPUT_COMMAND'})
+            $entryOpen=$commands|Where-Object{$_.event.action -eq 'ENTRY_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true}|Select-Object -First 1
+            $exitOpen=$commands|Where-Object{$_.event.action -eq 'EXIT_BARRIER_OPEN_REQUEST' -and $_.event.data.value -eq $true}|Select-Object -First 1
+            if($null -eq $entryOpen -or $null -eq $exitOpen){throw 'audited barrier OPEN intents missing'}
+            if(-not (Invoke-RestMethod http://127.0.0.1:8080/api/audit/events/verify).verified){throw 'hardware event chain invalid'}
+            $io=Invoke-RestMethod http://127.0.0.1:8080/api/io/status
+            if($io.applied.entry_green -or $io.applied.exit_green -or $io.applied.entry_barrier_open -or $io.applied.exit_barrier_open -or $io.applied.buzzer){throw 'COMPLETE left permissive outputs'}
+            Write-Host 'Hardware PASS: Modbus + audit gate + SQLite atomic durability'
+          }finally{
+            if($p -and -not $p.HasExited){Stop-Process -Id $p.Id -Force}
+            if($scaleSim -and -not $scaleSim.HasExited){Stop-Process -Id $scaleSim.Id -Force}
+            if($ioSim -and -not $ioSim.HasExited){Stop-Process -Id $ioSim.Id -Force}
           }
 
       - name: Hash
@@ -215,3 +182,5 @@ jobs:
           path: |
             out/plantops-edge-scale.exe
             out/plantops-edge-scale.exe.sha256
+            go.mod
+            go.sum

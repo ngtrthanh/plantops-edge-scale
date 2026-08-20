@@ -37,23 +37,26 @@ type Server struct {
 	ScaleMonitor    *scaleascii.Monitor
 	Workflow        Workflow
 	IOStatus        func() any
+	StorageStatus   func(context.Context) (any,error)
 	AllowSimulation bool
 	Version         string
 	GitSHA          string
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		payload := map[string]any{"status":"ok","service":"plantops-edge-scale-go","version":s.Version,"git_sha":s.GitSHA,"utc":time.Now().UTC(),"event_audit_configured":s.EventAudit!=nil}
+	mux:=http.NewServeMux()
+	mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){
+		payload:=map[string]any{"status":"ok","service":"plantops-edge-scale-go","version":s.Version,"git_sha":s.GitSHA,"utc":time.Now().UTC(),"event_audit_configured":s.EventAudit!=nil}
 		if s.ScaleMonitor!=nil{payload["scale"]=s.ScaleMonitor.Snapshot()}
 		if s.Workflow!=nil{payload["workflow"]=s.Workflow.Snapshot()}
 		if s.IOStatus!=nil{payload["io"]=s.IOStatus()}
+		if s.StorageStatus!=nil{if st,err:=s.StorageStatus(r.Context());err==nil{payload["storage"]=st}else{payload["status"]="degraded";payload["storage_error"]=err.Error()}}
 		writeJSON(w,http.StatusOK,payload)
 	})
 	mux.HandleFunc("GET /api/workflow",func(w http.ResponseWriter,_ *http.Request){if s.Workflow==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"workflow engine not configured"});return};writeJSON(w,http.StatusOK,s.Workflow.Snapshot())})
 	mux.HandleFunc("GET /api/io/status",func(w http.ResponseWriter,_ *http.Request){if s.IOStatus==nil{writeJSON(w,http.StatusOK,map[string]any{"enabled":false});return};writeJSON(w,http.StatusOK,s.IOStatus())})
 	mux.HandleFunc("GET /api/scale/status",func(w http.ResponseWriter,_ *http.Request){if s.ScaleMonitor==nil{writeJSON(w,http.StatusOK,map[string]any{"enabled":false});return};writeJSON(w,http.StatusOK,s.ScaleMonitor.Snapshot())})
+	mux.HandleFunc("GET /api/storage/status",func(w http.ResponseWriter,r *http.Request){if s.StorageStatus==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"storage not configured"});return};st,err:=s.StorageStatus(r.Context());if err!=nil{writeJSON(w,http.StatusInternalServerError,map[string]string{"error":err.Error()});return};writeJSON(w,http.StatusOK,st)})
 
 	mux.HandleFunc("GET /api/audit/weights",func(w http.ResponseWriter,r *http.Request){if s.WeightAudit==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"raw weight audit not configured"});return};records,err:=s.WeightAudit.Tail(parseLimit(r,200));if err!=nil{writeJSON(w,http.StatusInternalServerError,map[string]string{"error":err.Error()});return};writeJSON(w,http.StatusOK,map[string]any{"count":len(records),"records":records})})
 	mux.HandleFunc("GET /api/audit/weights/verify",func(w http.ResponseWriter,_ *http.Request){if s.WeightAudit==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"raw weight audit not configured"});return};writeVerify(w,s.WeightAudit.Verify())})
