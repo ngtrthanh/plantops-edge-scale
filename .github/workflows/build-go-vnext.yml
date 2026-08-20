@@ -29,39 +29,27 @@ jobs:
           $sha = "${{ github.sha }}"
           go build -trimpath -ldflags "-s -w -X main.version=0.2.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
+      - name: Build CI scale simulator
+        shell: pwsh
+        run: |
+          go build -trimpath -o out/scale-sim.exe ./.github/testdata/scale-sim.go
+          if (-not (Test-Path out/scale-sim.exe)) { throw "scale simulator missing" }
       - name: Runtime + raw weight audit smoke
         shell: pwsh
         run: |
           $auditPath = Join-Path $PWD 'out/raw-weight-ci.jsonl'
           Remove-Item $auditPath -ErrorAction SilentlyContinue
 
-          $scaleJob = Start-Job -ScriptBlock {
-            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 19001)
-            $listener.Start()
-            try {
-              $client = $listener.AcceptTcpClient()
-              try {
-                $stream = $client.GetStream()
-                foreach ($line in @(
-                  "WT=1200;ST=0;OVERLOAD=0;FAULT=`r`n",
-                  "WT=28420;ST=0;OVERLOAD=0;FAULT=`r`n",
-                  "WT=28460;ST=1;OVERLOAD=0;FAULT=`r`n"
-                )) {
-                  $bytes = [System.Text.Encoding]::ASCII.GetBytes($line)
-                  $stream.Write($bytes, 0, $bytes.Length)
-                  $stream.Flush()
-                  Start-Sleep -Milliseconds 150
-                }
-                Start-Sleep -Seconds 30
-              } finally {
-                $client.Close()
-              }
-            } finally {
-              $listener.Stop()
-            }
+          $simOut = Join-Path $PWD 'out/scale-sim.stdout.log'
+          $simErr = Join-Path $PWD 'out/scale-sim.stderr.log'
+          $scaleSim = Start-Process .\out\scale-sim.exe -PassThru -RedirectStandardOutput $simOut -RedirectStandardError $simErr
+          Start-Sleep -Seconds 1
+          if ($scaleSim.HasExited) {
+            Get-Content $simOut -ErrorAction SilentlyContinue
+            Get-Content $simErr -ErrorAction SilentlyContinue
+            throw "scale simulator exited before Edge connected"
           }
 
-          Start-Sleep -Milliseconds 500
           $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
             '-scale-addr','127.0.0.1:19001',
             '-station-id','CI-SCALE-01',
@@ -90,7 +78,14 @@ jobs:
               if ($frames.Count -ge 3) { $audited = $true; break }
               Start-Sleep -Milliseconds 200
             }
-            if (-not $audited) { throw "raw weight frames were not journaled" }
+            if (-not $audited) {
+              $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status
+              Write-Host "Scale status: $($scale | ConvertTo-Json -Depth 5 -Compress)"
+              if (Test-Path $auditPath) { Get-Content $auditPath }
+              Get-Content $simOut -ErrorAction SilentlyContinue
+              Get-Content $simErr -ErrorAction SilentlyContinue
+              throw "raw weight frames were not journaled"
+            }
 
             $weights = @($frames | ForEach-Object { [int64]$_.event.weight_kg })
             if ($weights[0] -ne 1200 -or $weights[1] -ne 28420 -or $weights[2] -ne 28460) {
@@ -112,7 +107,7 @@ jobs:
             Write-Host "Raw weight audit PASS: $($weights -join ' -> ') kg"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-            if ($scaleJob) { Stop-Job $scaleJob -ErrorAction SilentlyContinue; Remove-Job $scaleJob -Force -ErrorAction SilentlyContinue }
+            if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
           }
       - name: Hash
         shell: pwsh
