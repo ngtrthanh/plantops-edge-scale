@@ -108,8 +108,6 @@ jobs:
             if($scaleSim -and -not $scaleSim.HasExited){Stop-Process -Id $scaleSim.Id -Force}
           }
 
-          # Reboot/process-restart acceptance: same DB opens cleanly, durable rows
-          # remain, engine starts IDLE and with I/O disabled has nothing to replay.
           $p2=Start-Process .\out\plantops-edge-scale.exe -ArgumentList @('-listen','127.0.0.1:8081','-station-id','CI-SCALE-01','-db',$dbPath,'-raw-weight-journal',$weightPath,'-event-journal',$eventPath) -PassThru
           try{
             $ready=$false
@@ -184,4 +182,5 @@ jobs:
           path: |
             out/plantops-edge-scale.exe
             out/plantops-edge-scale.exe.sha256
+            go.mod
             go.sum
