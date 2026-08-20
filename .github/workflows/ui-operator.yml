@@ -89,7 +89,7 @@ jobs:
               "--user-data-dir=$profile",
               '--virtual-time-budget=800',
               '--dump-dom',
-              'http://127.0.0.1:8092/operator.html?demo=1&phase=WEIGHING&hold=1'
+              'http://127.0.0.1:8092/operator.html?demo=WEIGHING'
             )
             Write-Host "Headless browser: $browser"
             $dom = (& $browser @browserArgs 2>&1 | Out-String)
