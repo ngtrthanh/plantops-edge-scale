@@ -78,23 +78,26 @@ jobs:
             if (-not $browser) { throw 'No Chromium browser found on Windows runner' }
 
             $shot = Join-Path $PWD 'out\operator-ui-demo.png'
-            Remove-Item $shot -ErrorAction SilentlyContinue
+            $profile = Join-Path $PWD 'out\chrome-headless-profile'
+            Remove-Item $shot,$profile -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $profile | Out-Null
             $browserArgs = @(
-              '--headless=new',
+              '--headless',
               '--disable-gpu',
               '--hide-scrollbars',
+              '--no-first-run',
+              '--no-default-browser-check',
+              '--disable-background-networking',
+              "--user-data-dir=$profile",
               '--window-size=1600,1000',
-              "--screenshot=$shot",
-              'http://127.0.0.1:8092/operator.html?demo=1'
+              '--screenshot=out/operator-ui-demo.png',
+              'http://127.0.0.1:8092/operator.html?demo=1&phase=WEIGHING'
             )
             Write-Host "Headless browser: $browser"
             $global:LASTEXITCODE = $null
             & $browser @browserArgs
             if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "headless browser exited $LASTEXITCODE" }
-            if (-not (Test-Path $shot)) {
-              $fallback = Join-Path $PWD 'screenshot.png'
-              if (Test-Path $fallback) { Move-Item $fallback $shot -Force }
-            }
+            for($i=0;$i -lt 20 -and -not (Test-Path $shot);$i++){ Start-Sleep -Milliseconds 250 }
             if (-not (Test-Path $shot)) { throw 'headless browser screenshot missing' }
             if ((Get-Item $shot).Length -lt 30000) { throw "headless UI screenshot unexpectedly small: $((Get-Item $shot).Length)" }
             Write-Host "Operator UI PASS: embedded assets served and demo rendered in $browser"
