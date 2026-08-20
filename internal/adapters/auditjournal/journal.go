@@ -21,10 +21,20 @@ type Record struct {
 	Hash     string            `json:"hash"`
 }
 
-type hashPayload struct {
-	Seq      uint64            `json:"seq"`
-	PrevHash string            `json:"prev_hash,omitempty"`
-	Event    domain.AuditEvent `json:"event"`
+// rawRecord is the persistence representation. Event is retained as exact JSON
+// bytes so integrity verification never depends on decoding map[string]any and
+// re-encoding values with possibly different Go dynamic types.
+type rawRecord struct {
+	Seq      uint64          `json:"seq"`
+	PrevHash string          `json:"prev_hash,omitempty"`
+	Event    json.RawMessage `json:"event"`
+	Hash     string          `json:"hash"`
+}
+
+type rawHashPayload struct {
+	Seq      uint64          `json:"seq"`
+	PrevHash string          `json:"prev_hash,omitempty"`
+	Event    json.RawMessage `json:"event"`
 }
 
 type Journal struct {
@@ -42,19 +52,22 @@ func (j *Journal) Append(ctx context.Context, event domain.AuditEvent) (domain.A
 	defer j.mu.Unlock()
 
 	if j.Path == "" { return domain.AuditRef{}, errors.New("audit journal path is empty") }
-	if err := os.MkdirAll(filepath.Dir(j.Path), 0o755); err != nil { return domain.AuditRef{}, err }
+	dir := filepath.Dir(j.Path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil { return domain.AuditRef{}, err }
+	}
 	if !j.initialized {
 		if err := j.loadTail(); err != nil { return domain.AuditRef{}, err }
 	}
 
+	eventJSON, err := json.Marshal(event)
+	if err != nil { return domain.AuditRef{}, err }
 	next := j.seq + 1
-	payload := hashPayload{Seq: next, PrevHash: j.prevHash, Event: event}
-	canonical, err := json.Marshal(payload)
+	canonical, err := json.Marshal(rawHashPayload{Seq: next, PrevHash: j.prevHash, Event: eventJSON})
 	if err != nil { return domain.AuditRef{}, err }
 	sum := sha256.Sum256(canonical)
 	hash := hex.EncodeToString(sum[:])
-	record := Record{Seq: next, PrevHash: j.prevHash, Event: event, Hash: hash}
-	line, err := json.Marshal(record)
+	line, err := json.Marshal(rawRecord{Seq: next, PrevHash: j.prevHash, Event: eventJSON, Hash: hash})
 	if err != nil { return domain.AuditRef{}, err }
 
 	f, err := os.OpenFile(j.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -86,9 +99,11 @@ func (j *Journal) Tail(limit int) ([]Record, error) {
 	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for s.Scan() {
 		if len(s.Bytes()) == 0 { continue }
-		var r Record
-		if err := json.Unmarshal(s.Bytes(), &r); err != nil { return nil, err }
-		ring[count%limit] = r
+		var raw rawRecord
+		if err := json.Unmarshal(s.Bytes(), &raw); err != nil { return nil, err }
+		var event domain.AuditEvent
+		if err := json.Unmarshal(raw.Event, &event); err != nil { return nil, err }
+		ring[count%limit] = Record{Seq: raw.Seq, PrevHash: raw.PrevHash, Event: event, Hash: raw.Hash}
 		count++
 	}
 	if err := s.Err(); err != nil { return nil, err }
@@ -100,7 +115,11 @@ func (j *Journal) Tail(limit int) ([]Record, error) {
 	return out, nil
 }
 
-func (j *Journal) Verify() error { return Verify(j.Path) }
+func (j *Journal) Verify() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return Verify(j.Path)
+}
 
 func (j *Journal) loadTail() error {
 	j.initialized = true
@@ -111,7 +130,7 @@ func (j *Journal) loadTail() error {
 
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var last Record
+	var last rawRecord
 	found := false
 	for s.Scan() {
 		if len(s.Bytes()) == 0 { continue }
@@ -133,12 +152,11 @@ func Verify(path string) error {
 	s.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for s.Scan() {
 		if len(s.Bytes()) == 0 { continue }
-		var r Record
+		var r rawRecord
 		if err := json.Unmarshal(s.Bytes(), &r); err != nil { return err }
 		if r.Seq != expected { return errors.New("audit journal sequence break") }
 		if r.PrevHash != prev { return errors.New("audit journal previous hash mismatch") }
-		payload := hashPayload{Seq: r.Seq, PrevHash: r.PrevHash, Event: r.Event}
-		canonical, err := json.Marshal(payload)
+		canonical, err := json.Marshal(rawHashPayload{Seq: r.Seq, PrevHash: r.PrevHash, Event: r.Event})
 		if err != nil { return err }
 		sum := sha256.Sum256(canonical)
 		if r.Hash != hex.EncodeToString(sum[:]) { return errors.New("audit journal record hash mismatch") }
