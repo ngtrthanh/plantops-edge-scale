@@ -9,6 +9,21 @@ const (
 	RawWeightTransportError RawWeightEventKind = "TRANSPORT_ERROR"
 )
 
+// RawWeightRef is the immutable pointer from derived business facts back to
+// the exact station-level raw-weight journal record that produced them.
+type RawWeightRef struct {
+	Seq  uint64 `json:"seq"`
+	Hash string `json:"hash"`
+}
+
+// AuditedScaleReading is the only scale observation the workflow engine should
+// consume. The RawRef proves that the exact controller frame was durably
+// appended before the reading became eligible for business logic.
+type AuditedScaleReading struct {
+	Reading ScaleReading  `json:"reading"`
+	RawRef  RawWeightRef `json:"raw_ref"`
+}
+
 // RawWeightEvent is the append-only audit representation of every scale input
 // observation before business logic consumes it. RawBase64 preserves the exact
 // bytes received from the controller; RawText is convenience-only for ASCII
