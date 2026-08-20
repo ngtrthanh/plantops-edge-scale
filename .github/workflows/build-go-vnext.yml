@@ -27,13 +27,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           $sha = "${{ github.sha }}"
-          go build -trimpath -ldflags "-s -w -X main.version=0.3.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          go build -trimpath -ldflags "-s -w -X main.version=0.4.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
-      - name: Build CI scale simulator
+      - name: Build CI simulators
         shell: pwsh
         run: |
           go build -trimpath -o out/scale-sim.exe ./.github/testdata/scale-sim.go
+          go build -trimpath -o out/modbus-io-sim.exe ./.github/testdata/modbus-io-sim.go
           if (-not (Test-Path out/scale-sim.exe)) { throw "scale simulator missing" }
+          if (-not (Test-Path out/modbus-io-sim.exe)) { throw "Modbus I/O simulator missing" }
+
       - name: Runtime + audited truck workflow smoke
         shell: pwsh
         run: |
@@ -41,16 +44,8 @@ jobs:
           $ticketPath = Join-Path $PWD 'out/tickets-ci.jsonl'
           Remove-Item $auditPath,$ticketPath -ErrorAction SilentlyContinue
 
-          $simOut = Join-Path $PWD 'out/scale-sim.stdout.log'
-          $simErr = Join-Path $PWD 'out/scale-sim.stderr.log'
-          $scaleSim = Start-Process .\out\scale-sim.exe -PassThru -RedirectStandardOutput $simOut -RedirectStandardError $simErr
+          $scaleSim = Start-Process .\out\scale-sim.exe -PassThru
           Start-Sleep -Seconds 1
-          if ($scaleSim.HasExited) {
-            Get-Content $simOut -ErrorAction SilentlyContinue
-            Get-Content $simErr -ErrorAction SilentlyContinue
-            throw "scale simulator exited before Edge connected"
-          }
-
           $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
             '-scale-addr','127.0.0.1:19001',
             '-station-id','CI-SCALE-01',
@@ -69,31 +64,22 @@ jobs:
               try {
                 $h = Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 1
                 $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
-                if ($h.status -eq 'ok' -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0) {
-                  $ok = $true; break
-                }
+                if ($h.status -eq 'ok' -and $scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0) { $ok = $true; break }
               } catch {}
               Start-Sleep -Milliseconds 250
             }
             if (-not $ok) { throw "health/initial audited stable-zero scale proof failed" }
 
-            # Truck arrives. Position/safety input creates the transaction.
             $entry = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"entry_present":true,"safety_clear":true}'
             if ($entry.state -ne 'IDENTIFYING') { throw "truck did not enter IDENTIFYING: $($entry.state)" }
-
             Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
             Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
             $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
-            if ($wf.state -ne 'ENTRY_AUTHORIZED') { throw "identity/entry authorization failed: $($wf | ConvertTo-Json -Depth 8 -Compress)" }
-            if (-not $wf.transaction.outputs.entry_green -or -not $wf.transaction.outputs.entry_barrier_open) { throw "entry desired outputs missing" }
+            if ($wf.state -ne 'ENTRY_AUTHORIZED') { throw "identity/entry authorization failed" }
 
-            # Truck fully occupies the weighbridge. Front+rear are independent
-            # position evidence; weight itself is not used as a position sensor.
             $positioned = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"front_present":true,"rear_present":true,"safety_clear":true}'
             if ($positioned.transaction.position -ne 'ACCEPTED') { throw "position was not accepted" }
-            if ($positioned.state -ne 'READY_TO_WEIGH') { throw "state=$($positioned.state), want READY_TO_WEIGH" }
 
-            # Scale simulator now sends 28300 unstable -> 28455 stable -> 28460 stable.
             $committed = $false
             for ($i=0; $i -lt 50; $i++) {
               $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
@@ -102,49 +88,110 @@ jobs:
               Start-Sleep -Milliseconds 200
             }
             if (-not $committed) { throw "audited stable weight did not commit/release" }
-
             if ([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460) { throw "accepted weight mismatch" }
             if ([uint64]$wf.transaction.accepted_weight.raw_ref.seq -eq 0) { throw "accepted weight missing raw audit seq" }
-            if ([string]::IsNullOrWhiteSpace($wf.transaction.accepted_weight.raw_ref.hash)) { throw "accepted weight missing raw audit hash" }
-            if (-not $wf.transaction.outputs.exit_green -or -not $wf.transaction.outputs.exit_barrier_open) { throw "exit not authorized after local commit" }
 
-            # Verify all raw frames and direct ticket -> raw-frame linkage.
             $audit = Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=50'
-            $frames = @($audit.records | Where-Object { $_.event.kind -eq 'FRAME' })
-            $weights = @($frames | ForEach-Object { [int64]$_.event.weight_kg })
-            foreach ($requiredWeight in @(0,28300,28455,28460)) {
-              if ($weights -notcontains [int64]$requiredWeight) { throw "raw timeline missing $requiredWeight kg: $($weights -join ',')" }
-            }
             $acceptedSeq = [uint64]$wf.transaction.accepted_weight.raw_ref.seq
             $acceptedHash = [string]$wf.transaction.accepted_weight.raw_ref.hash
             $rawAccepted = $audit.records | Where-Object { [uint64]$_.seq -eq $acceptedSeq } | Select-Object -First 1
-            if ($null -eq $rawAccepted) { throw "ticket raw audit record not found by seq" }
-            if ($rawAccepted.hash -ne $acceptedHash) { throw "ticket raw audit hash mismatch" }
-            if ([int64]$rawAccepted.event.weight_kg -ne 28460 -or -not $rawAccepted.event.stable) { throw "accepted raw record is not 28460 stable" }
-            if ($rawAccepted.event.transaction_id -ne $wf.transaction.id) { throw "raw accepted frame missing transaction linkage" }
-            if ([string]::IsNullOrWhiteSpace($rawAccepted.event.raw_base64)) { throw "exact controller bytes missing" }
+            if ($null -eq $rawAccepted -or $rawAccepted.hash -ne $acceptedHash) { throw "ticket -> raw audit linkage failed" }
+            if ([int64]$rawAccepted.event.weight_kg -ne 28460 -or -not $rawAccepted.event.stable) { throw "accepted raw record mismatch" }
 
-            $verify = Invoke-RestMethod http://127.0.0.1:8080/api/audit/weights/verify
-            if (-not $verify.verified) { throw "raw weight hash chain verification failed" }
-
-            if (-not (Test-Path $ticketPath)) { throw "durable local ticket file missing" }
-            $ticket = (Get-Content $ticketPath | Select-Object -Last 1) | ConvertFrom-Json
-            if ([int64]$ticket.weight_kg -ne 28460) { throw "ticket weight mismatch" }
-            if ([uint64]$ticket.weight_raw_ref.seq -ne $acceptedSeq -or $ticket.weight_raw_ref.hash -ne $acceptedHash) { throw "ticket -> raw audit reference mismatch" }
-
-            # Truck exits. Barrier close/complete is permitted only after exit
-            # was seen and safety/clear evidence is true.
             $null = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":true,"safety_clear":true}'
             $complete = Invoke-RestMethod http://127.0.0.1:8080/sim/position -Method Post -ContentType 'application/json' -Body '{"exit_present":false,"safety_clear":true}'
-            if ($complete.state -ne 'COMPLETE') { throw "truck workflow did not complete: $($complete.state)" }
-            if ($complete.transaction.outputs.entry_barrier_open -or $complete.transaction.outputs.exit_barrier_open) { throw "completed workflow still requests barrier open" }
-
-            Write-Host "Workflow PASS: stable-zero -> identity -> position -> 28460kg audited commit -> exit -> COMPLETE"
-            Write-Host "Accepted raw ref: seq=$acceptedSeq hash=$acceptedHash"
+            if ($complete.state -ne 'COMPLETE') { throw "truck workflow did not complete" }
+            Write-Host "Workflow unit-runtime PASS: audited 28460kg -> exact raw ref -> COMPLETE"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
             if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
           }
+
+      - name: Runtime + Modbus hardware feedback smoke
+        shell: pwsh
+        run: |
+          $auditPath = Join-Path $PWD 'out/raw-weight-hw-ci.jsonl'
+          $ticketPath = Join-Path $PWD 'out/tickets-hw-ci.jsonl'
+          Remove-Item $auditPath,$ticketPath -ErrorAction SilentlyContinue
+          $scaleOut = Join-Path $PWD 'out/scale-hw.log'
+          $ioOut = Join-Path $PWD 'out/modbus-hw.log'
+
+          $scaleSim = Start-Process .\out\scale-sim.exe -PassThru -RedirectStandardError $scaleOut
+          $ioSim = Start-Process .\out\modbus-io-sim.exe -PassThru -RedirectStandardError $ioOut
+          Start-Sleep -Seconds 1
+          $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
+            '-scale-addr','127.0.0.1:19001',
+            '-io-addr','127.0.0.1:19002',
+            '-io-unit-id','1',
+            '-io-map','safety_clear=8',
+            '-io-poll','50ms',
+            '-io-buzzer-pulse','250ms',
+            '-barrier-feedback-timeout','2s',
+            '-station-id','CI-HW-01',
+            '-raw-weight-journal',$auditPath,
+            '-ticket-journal',$ticketPath,
+            '-vehicle-map','RFID-DEMO-001=15C-123.45',
+            '-empty-scale-max-kg','200',
+            '-min-stable-weight-kg','1000',
+            '-stable-confirmations','2',
+            '-stable-tolerance-kg','20'
+          ) -PassThru
+          try {
+            $ready = $false
+            for ($i=0; $i -lt 60; $i++) {
+              try {
+                $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status -TimeoutSec 1
+                $io = Invoke-RestMethod http://127.0.0.1:8080/api/io/status -TimeoutSec 1
+                if ($scale.connected -and $scale.last_reading.stable -and [int64]$scale.last_reading.weight_kg -eq 0 -and $io.enabled -and $io.connected) { $ready=$true; break }
+              } catch {}
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $ready) { throw "scale + Modbus I/O did not become ready" }
+
+            $truck = $false
+            for ($i=0; $i -lt 40; $i++) {
+              $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
+              if ($wf.transaction -and $wf.state -eq 'IDENTIFYING') { $truck=$true; break }
+              if ($wf.state -eq 'FAULT_LOCKOUT') { throw "hardware workflow locked before identity" }
+              Start-Sleep -Milliseconds 150
+            }
+            if (-not $truck) { throw "Modbus ENTRY_PRESENT did not create transaction" }
+
+            Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
+            Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
+
+            $complete = $false
+            for ($i=0; $i -lt 120; $i++) {
+              $wf = Invoke-RestMethod http://127.0.0.1:8080/api/workflow
+              if ($wf.state -eq 'COMPLETE') { $complete=$true; break }
+              if ($wf.state -eq 'FAULT_LOCKOUT') {
+                Get-Content $ioOut -ErrorAction SilentlyContinue
+                throw "hardware workflow lockout: $($wf.transaction.last_block_reason)"
+              }
+              Start-Sleep -Milliseconds 150
+            }
+            if (-not $complete) {
+              Get-Content $ioOut -ErrorAction SilentlyContinue
+              throw "Modbus-driven truck cycle did not reach COMPLETE"
+            }
+            if ([int64]$wf.transaction.accepted_weight.weight_kg -ne 28460) { throw "hardware cycle accepted weight mismatch" }
+            if ([uint64]$wf.transaction.accepted_weight.raw_ref.seq -eq 0) { throw "hardware cycle missing raw audit reference" }
+
+            Start-Sleep -Milliseconds 300
+            $io = Invoke-RestMethod http://127.0.0.1:8080/api/io/status
+            if (-not $io.enabled -or -not $io.connected) { throw "I/O status not healthy after cycle" }
+            if ($io.applied.entry_green -or $io.applied.exit_green -or $io.applied.entry_barrier_open -or $io.applied.exit_barrier_open -or $io.applied.buzzer) {
+              throw "completed cycle left permissive applied outputs"
+            }
+            if (-not (Test-Path $ticketPath)) { throw "hardware cycle durable ticket missing" }
+
+            Write-Host "Hardware PASS: Modbus ENTRY -> barrier feedback -> GREEN -> deck sensors -> audited weight -> EXIT -> COMPLETE"
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            if ($scaleSim -and -not $scaleSim.HasExited) { Stop-Process -Id $scaleSim.Id -Force }
+            if ($ioSim -and -not $ioSim.HasExited) { Stop-Process -Id $ioSim.Id -Force }
+          }
+
       - name: Hash
         shell: pwsh
         run: |

@@ -8,33 +8,16 @@ import (
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/domain"
 )
 
-type Mapping struct {
-	EntryPresent       uint16
-	FrontPresent       uint16
-	RearPresent        uint16
-	ExitPresent        uint16
-	EntryBarrierOpen   uint16
-	EntryBarrierClosed uint16
-	ExitBarrierOpen    uint16
-	ExitBarrierClosed  uint16
-
-	// SafetyClear is optional in the adapter configuration but fail-safe in behavior:
-	// if it is not configured, PositionSnapshot.SafetyClear remains false.
-	SafetyClear *uint16
-
-	EntryGreen          uint16
-	ExitGreen           uint16
-	Buzzer              uint16
-	EntryBarrierOpenCmd uint16
-	ExitBarrierOpenCmd  uint16
-}
-
 type IO struct {
 	Client  *Client
 	Mapping Mapping
 }
 
 func (io *IO) ReadInputs(ctx context.Context) (domain.PositionSnapshot, error) {
+	if io.Client == nil {
+		return domain.PositionSnapshot{}, fmt.Errorf("Modbus client is nil")
+	}
+
 	addresses := []uint16{
 		io.Mapping.EntryPresent,
 		io.Mapping.FrontPresent,
@@ -45,44 +28,57 @@ func (io *IO) ReadInputs(ctx context.Context) (domain.PositionSnapshot, error) {
 		io.Mapping.ExitBarrierOpen,
 		io.Mapping.ExitBarrierClosed,
 	}
-	values := make([]bool, len(addresses))
-	for i, addr := range addresses {
-		bits, err := io.Client.ReadDiscreteInputs(ctx, addr, 1)
-		if err != nil {
-			return domain.PositionSnapshot{}, fmt.Errorf("read DI %d: %w", addr, err)
-		}
-		values[i] = bits[0]
+	if io.Mapping.SafetyClear != nil {
+		addresses = append(addresses, *io.Mapping.SafetyClear)
 	}
+	minAddr, maxAddr := addresses[0], addresses[0]
+	for _, addr := range addresses[1:] {
+		if addr < minAddr { minAddr = addr }
+		if addr > maxAddr { maxAddr = addr }
+	}
+	bits, err := io.Client.ReadDiscreteInputs(ctx, minAddr, maxAddr-minAddr+1)
+	if err != nil {
+		return domain.PositionSnapshot{}, fmt.Errorf("read DI block %d..%d: %w", minAddr, maxAddr, err)
+	}
+	get := func(addr uint16) bool { return bits[int(addr-minAddr)] }
 
 	safetyClear := false
 	if io.Mapping.SafetyClear != nil {
-		bits, err := io.Client.ReadDiscreteInputs(ctx, *io.Mapping.SafetyClear, 1)
-		if err != nil {
-			return domain.PositionSnapshot{}, fmt.Errorf("read physical safety DI %d: %w", *io.Mapping.SafetyClear, err)
-		}
-		safetyClear = bits[0]
+		safetyClear = get(*io.Mapping.SafetyClear)
 	}
-
 	return domain.PositionSnapshot{
-		EntryPresent:       values[0],
-		FrontPresent:       values[1],
-		RearPresent:        values[2],
-		ExitPresent:        values[3],
-		EntryBarrierOpen:   values[4],
-		EntryBarrierClosed: values[5],
-		ExitBarrierOpen:    values[6],
-		ExitBarrierClosed:  values[7],
+		EntryPresent:       get(io.Mapping.EntryPresent),
+		FrontPresent:       get(io.Mapping.FrontPresent),
+		RearPresent:        get(io.Mapping.RearPresent),
+		ExitPresent:        get(io.Mapping.ExitPresent),
+		EntryBarrierOpen:   get(io.Mapping.EntryBarrierOpen),
+		EntryBarrierClosed: get(io.Mapping.EntryBarrierClosed),
+		ExitBarrierOpen:    get(io.Mapping.ExitBarrierOpen),
+		ExitBarrierClosed:  get(io.Mapping.ExitBarrierClosed),
 		SafetyClear:        safetyClear,
 		Observed:           time.Now().UTC(),
 	}, nil
 }
 
+// SetEntryLight drives a mutually exclusive RED/GREEN pair. Ordering is
+// fail-safe: the currently permissive GREEN is always removed before RED is
+// asserted; when granting GREEN, RED is removed first so a partial failure
+// leaves the signal dark rather than falsely permissive.
 func (io *IO) SetEntryLight(ctx context.Context, green bool) error {
-	return io.Client.WriteSingleCoil(ctx, io.Mapping.EntryGreen, green)
+	return io.setSignal(ctx, io.Mapping.EntryRed, io.Mapping.EntryGreen, green)
 }
 
 func (io *IO) SetExitLight(ctx context.Context, green bool) error {
-	return io.Client.WriteSingleCoil(ctx, io.Mapping.ExitGreen, green)
+	return io.setSignal(ctx, io.Mapping.ExitRed, io.Mapping.ExitGreen, green)
+}
+
+func (io *IO) setSignal(ctx context.Context, redAddr, greenAddr uint16, green bool) error {
+	if green {
+		if err := io.Client.WriteSingleCoil(ctx, redAddr, false); err != nil { return err }
+		return io.Client.WriteSingleCoil(ctx, greenAddr, true)
+	}
+	if err := io.Client.WriteSingleCoil(ctx, greenAddr, false); err != nil { return err }
+	return io.Client.WriteSingleCoil(ctx, redAddr, true)
 }
 
 func (io *IO) SetBuzzer(ctx context.Context, on bool) error {
@@ -95,4 +91,15 @@ func (io *IO) RequestEntryBarrier(ctx context.Context, open bool) error {
 
 func (io *IO) RequestExitBarrier(ctx context.Context, open bool) error {
 	return io.Client.WriteSingleCoil(ctx, io.Mapping.ExitBarrierOpenCmd, open)
+}
+
+// SafeState is called at startup/reconnect before any workflow command is
+// honored. It removes permissive outputs and open requests, while showing RED.
+func (io *IO) SafeState(ctx context.Context) error {
+	if err := io.SetBuzzer(ctx, false); err != nil { return fmt.Errorf("buzzer safe: %w", err) }
+	if err := io.SetEntryLight(ctx, false); err != nil { return fmt.Errorf("entry signal safe: %w", err) }
+	if err := io.SetExitLight(ctx, false); err != nil { return fmt.Errorf("exit signal safe: %w", err) }
+	if err := io.RequestEntryBarrier(ctx, false); err != nil { return fmt.Errorf("entry barrier safe: %w", err) }
+	if err := io.RequestExitBarrier(ctx, false); err != nil { return fmt.Errorf("exit barrier safe: %w", err) }
+	return nil
 }

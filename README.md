@@ -2,71 +2,104 @@
 
 Offline-first unmanned truck weighbridge Edge controller.
 
-## Direction
+## Target runtime
 
-The target runtime is now **Go single binary**:
+**Go single binary**:
 
 ```text
 Windows
 └── plantops-edge-scale.exe
-    ├── embedded HTTP/API
-    ├── embedded operator UI
-    ├── domain state machine
-    ├── hardware adapters
-    ├── local durable persistence
-    ├── audit/events
-    └── Central sync
+    ├── embedded HTTP/API + operator UI
+    ├── audited truck workflow state engine
+    ├── scale / Modbus / RFID / LPR adapters
+    ├── local durable ticket + audit persistence
+    └── later Central sync
 ```
 
-No IIS. No Docker Desktop. No WSL2. No separate Node runtime. No language runtime bundle.
+No IIS, Docker Desktop, WSL2, Node runtime, or .NET runtime dependency.
 
-The existing C# / Kestrel demo remains in the repository temporarily as a validated behavioral reference during migration. It is not the long-term architecture.
+The C# implementation remains only as a temporary behavioral reference during migration.
 
 ## Design truth
 
-Read these first:
+- `docs/EDGE-KNOWLEDGE.md` — operating modes, overrides, lockout and safety rules.
+- `docs/PSEUDOCODE.md` — whole-repo behavior.
+- `docs/RAW-WEIGHT-AUDIT.md` — mandatory all-frame scale audit.
+- `docs/HARDWARE-WIRING.md` — physical topology and commissioning plan.
+- `docs/MODBUS-RUNTIME.md` — Phase 2B polling/reconciliation and safe-start semantics.
+- `docs/GO-PORTING.md` — staged C# → Go cutover.
 
-- `docs/EDGE-KNOWLEDGE.md` — operating rules, degraded/manual/lockout semantics, override policy.
-- `docs/PSEUDOCODE.md` — full repository behavior from process startup through truck cycle, override, persistence, sync, recovery, and deployment.
-- `docs/RAW-WEIGHT-AUDIT.md` — mandatory all-frame raw scale journal, time-series reconstruction and integrity rules.
-- `docs/HARDWARE-WIRING.md` — hardware topology, signal map, wiring/commissioning/fault-injection plan.
-- `docs/GO-PORTING.md` — staged C# → Go cutover plan.
-
-## Non-negotiable safety/operations rules
+## Non-negotiable rules
 
 ```text
-Scale weight/stable authority: NEVER software-overridden.
-Every scale frame: raw bytes + UTC timestamp durably journaled before business use.
-Raw audit persistence failure: reading cannot become ticket truth.
-Auxiliary sensor override: transaction-scoped only.
-One allowed auxiliary failure: DEGRADED if fallback evidence is sufficient.
+Scale weight/stable/fault authority: NEVER software-overridden.
+Every scale frame: durably journal exact raw bytes + UTC before business use.
+Ticket accepted weight: stores exact raw audit seq/hash reference.
+Raw audit failure: reading cannot become ticket truth.
+Entry: requires RFID/LPR identity, physical safety, clear position sensors,
+       and audited HEALTHY + STABLE near-zero scale proof.
+Auxiliary override: transaction-scoped only.
 Multiple correlated failures: MANUAL/supervisor path.
-Unsafe critical failure: FAULT_LOCKOUT.
+Critical/unsafe failure: FAULT_LOCKOUT.
 Local durable ticket commit: required before truck release.
-Central/WAN outage: must not stop a valid local weighing operation.
-Physical barrier safety: independent of application process.
+Central/WAN: never part of local release authorization.
+Physical barrier anti-collision/safety: independent of application process.
 ```
 
-## Go vNext currently implemented
+## Implemented Go architecture
 
 ```text
 cmd/edge/main.go
-internal/domain/          health/mode/ticket/override + raw-weight event model
-internal/ports/           hardware/persistence boundaries
+
+internal/domain/
+  health / modes / faults / overrides
+  workflow state / desired outputs
+  audited scale reading + raw reference
+
+internal/engine/
+  deterministic truck workflow
+
 internal/adapters/
-  modbustcp/              dependency-free Modbus TCP DI/coil client
-  scaleascii/             generic parser + persistent TCP all-frame collector
-  rawjournal/             durable append-only hash-chained raw weight JSONL journal
-  ingress/                RFID + LPR normalized webhook ingress
-  jsonl/                  durable zero-dependency bootstrap ticket store
-internal/httpapi/          embedded API + embedded web UI
+  scaleascii/     persistent audited scale TCP stream
+  rawjournal/     append-only SHA-256 chained raw weight journal
+  modbustcp/      dependency-free Modbus TCP DI/coil adapter
+  ingress/        RFID + LPR normalized ingress
+  registry/       bootstrap RFID -> plate map
+  jsonl/          durable bootstrap ticket store
+
+internal/runtimeio/
+  Modbus input poller
+  safe-start/reconnect output reconciler
+  barrier-feedback GREEN gating
+  bounded buzzer pulse
+  remote-I/O/barrier fault reporting
+
+internal/httpapi/
+  embedded HTTP API + UI
 ```
 
-The live scale collector keeps the TCP connection open, journals every received frame before publishing the parsed reading, journals transport errors, and reconnects without resetting the station audit sequence.
+## Truck workflow
 
-The generic scale parser is intentionally not presented as the production scale protocol. A vendor-specific adapter must be written from the real controller manual/sample frames.
+```text
+IDLE
+→ APPROACH
+→ IDENTIFYING
+→ ENTRY_AUTHORIZED
+→ ENTERING
+→ POSITIONING
+→ READY_TO_WEIGH
+→ WEIGHING
+→ LOCAL_COMMITTED
+→ EXIT_AUTHORIZED
+→ EXITING
+→ COMPLETE
+```
 
-## Go development
+Critical failure can transition the active transaction to `FAULT_LOCKOUT` at any point.
+
+## Run
+
+Development:
 
 ```bash
 go test ./...
@@ -74,102 +107,120 @@ go vet ./...
 go run ./cmd/edge
 ```
 
-Run with live scale collection:
+Scale-only example:
 
 ```text
 plantops-edge-scale.exe \
   -station-id WHD-NC \
   -scale-addr 192.168.1.50:4001 \
-  -raw-weight-journal data/raw-weight.jsonl
+  -raw-weight-journal data/raw-weight.jsonl \
+  -vehicle-map "RFID001=15C-123.45"
 ```
 
-Open:
+Scale + remote I/O example:
 
 ```text
-http://127.0.0.1:8080
+plantops-edge-scale.exe \
+  -station-id WHD-NC \
+  -scale-addr 192.168.1.50:4001 \
+  -io-addr 192.168.1.60:502 \
+  -io-unit-id 1 \
+  -io-map "safety_clear=8" \
+  -raw-weight-journal data/raw-weight.jsonl \
+  -ticket-journal data/tickets.jsonl \
+  -vehicle-map "RFID001=15C-123.45"
 ```
 
-Current APIs:
+`-io-addr` empty means no physical Modbus reads or writes.
+
+## APIs
 
 ```text
-POST /io/rfid
-POST /io/lpr
-GET  /api/identity
+GET  /healthz
+GET  /api/workflow
 GET  /api/scale/status
+GET  /api/io/status
+GET  /api/identity
 GET  /api/audit/weights?limit=200
 GET  /api/audit/weights/verify
-GET  /healthz
+POST /io/rfid
+POST /io/lpr
 ```
 
-## Raw weight audit path
+`/sim/*` endpoints exist only when the process is started with explicit `-simulation`.
+
+## Raw weight audit
 
 ```text
-scale controller TCP stream
-→ exact controller frame bytes
-→ received_at_utc
-→ append-only hash-chained raw journal
-→ parse weight/stable/fault
-→ publish normalized reading
-→ future state machine
+controller frame
+→ exact bytes + Edge UTC timestamp
+→ fsync append-only hash-chain journal
+→ parse/normalize
+→ AuditedScaleReading{reading, raw_seq, raw_hash}
+→ workflow
+→ durable ticket stores accepted raw_seq/raw_hash
 ```
 
-Raw logging is station-continuous. Frames outside an active ticket are still retained; when the state engine exists it will attach the active `transaction_id` without changing the continuous station sequence.
+Therefore an accepted ticket can be traced directly back to the exact controller frame and the complete raw weight curve around that transaction.
 
-Existing journal integrity is verified at process startup. A broken hash chain is not silently repaired.
+## Remote-I/O runtime safety
+
+```text
+connect/read remote I/O
+→ force SafeState first
+   RED, GREEN off, buzzer off, OPEN requests off
+→ then reconcile Engine DesiredOutputs
+```
+
+A reconnect never blindly replays stale barrier commands.
+
+Permissive GREEN is feedback-gated:
+
+```text
+Engine authorizes OPEN + GREEN
+→ OPEN_REQUEST coil
+→ wait physical OPEN feedback
+→ GREEN ON
+```
+
+Remote-I/O transport failure or contradictory/timeout barrier feedback is a critical fault.
 
 ## CI
 
-`.github/workflows/build-go-vnext.yml` runs tests/vet on a GitHub-hosted Windows runner, builds one Windows executable, launches a TCP scale simulator, runs the EXE against that socket, and verifies:
+GitHub-hosted Windows CI verifies:
 
 ```text
-/healthz
-RFID/LPR ingress
-continuous scale collector
-1200 → 28420 → 28460 kg raw timeline
-stable=true on final frame
-exact raw bytes retained
-station ID retained
-hash-chain verification
-live scale status
+go test ./...
+go vet ./...
+single plantops-edge-scale.exe build
+raw-weight TCP simulator
+all-frame audit + hash chain
+full audited transaction
+exact ticket -> raw frame linkage
+Modbus TCP I/O simulator
+ENTRY sensor -> barrier request -> OPEN feedback -> GREEN
+FRONT/REAR position -> audited stable weight -> durable ticket
+EXIT barrier -> feedback -> exit sensor -> COMPLETE
+no permissive applied outputs after completion
+artifact SHA-256
 ```
 
-It then hashes the EXE and uploads an immutable artifact.
-
-Target artifact:
-
-```text
-plantops-edge-scale.exe
-plantops-edge-scale.exe.sha256
-```
-
-## Hardware boundary
-
-Preferred architecture:
-
-```text
-scale controller ─────────────── TCP/serial adapter ─┐
-Modbus TCP remote I/O ─ sensors/outputs ────────────┤
-RFID Ethernet reader ───────────────────────────────┤
-LPR camera / edge OCR ──────────────────────────────┤
-                                                     ↓
-                                            Go domain engine
-```
-
-The Edge app coordinates business workflow. It does not replace certified weighing authority or the barrier's physical anti-collision/safety circuit.
+Test simulators are never shipped in the production artifact.
 
 ## Migration status
 
 ```text
-Phase 0  C# behavioral reference                DONE
-Phase 1  Go skeleton + adapter boundaries       BASELINE DONE
-Phase 1A raw weight audit model/journal         DONE
-Phase 1B continuous raw collector + runtime API IN VERIFICATION
-Phase 2  full Go event/state machine            NEXT
-Phase 3  SQLite persistence                     NEXT
-Phase 4  real scale-controller adapter          NEED PROTOCOL
-Phase 5  remote-I/O bench integration           PLANNED
-Phase 6  RFID/LPR real integration              PLANNED
-Phase 7  production shadow mode                 PLANNED
-Phase 8  supervised outputs                     PLANNED
-Phase 9  Go primary / C# retired                PLANNED
+Phase 0   C# behavioral reference                         DONE
+Phase 1   Go skeleton + adapter boundaries                DONE
+Phase 1A  all-frame raw weight audit                      DONE
+Phase 2   audited Go truck workflow state engine          DONE
+Phase 2B  Modbus input poller + output reconciler         IN VERIFICATION
+Phase 2C  general event/action audit journal              NEXT
+Phase 3   SQLite single-file persistence                  NEXT
+Phase 4   exact real scale-controller adapter             NEED REAL PROTOCOL
+Phase 5   real remote-I/O bench integration               PLANNED
+Phase 6   real RFID/LPR integration                       PLANNED
+Phase 7   production shadow mode                          PLANNED
+Phase 8   supervised outputs                              PLANNED
+Phase 9   Go primary / C# retired                         PLANNED
 ```

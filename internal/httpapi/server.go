@@ -25,6 +25,7 @@ type Server struct {
 	WeightAudit     *rawjournal.Journal
 	ScaleMonitor    *scaleascii.Monitor
 	Workflow        *engine.Engine
+	IOStatus        func() any
 	AllowSimulation bool
 	Version         string
 	GitSHA          string
@@ -37,12 +38,9 @@ func (s *Server) Handler() http.Handler {
 			"status": "ok", "service": "plantops-edge-scale-go", "version": s.Version,
 			"git_sha": s.GitSHA, "utc": time.Now().UTC(),
 		}
-		if s.ScaleMonitor != nil {
-			payload["scale"] = s.ScaleMonitor.Snapshot()
-		}
-		if s.Workflow != nil {
-			payload["workflow"] = s.Workflow.Snapshot()
-		}
+		if s.ScaleMonitor != nil { payload["scale"] = s.ScaleMonitor.Snapshot() }
+		if s.Workflow != nil { payload["workflow"] = s.Workflow.Snapshot() }
+		if s.IOStatus != nil { payload["io"] = s.IOStatus() }
 		writeJSON(w, http.StatusOK, payload)
 	})
 	mux.HandleFunc("GET /api/workflow", func(w http.ResponseWriter, _ *http.Request) {
@@ -51,6 +49,13 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, s.Workflow.Snapshot())
+	})
+	mux.HandleFunc("GET /api/io/status", func(w http.ResponseWriter, _ *http.Request) {
+		if s.IOStatus == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, s.IOStatus())
 	})
 	mux.HandleFunc("GET /api/scale/status", func(w http.ResponseWriter, _ *http.Request) {
 		if s.ScaleMonitor == nil {
@@ -66,9 +71,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		limit := 200
 		if raw := r.URL.Query().Get("limit"); raw != "" {
-			if n, err := strconv.Atoi(raw); err == nil {
-				limit = n
-			}
+			if n, err := strconv.Atoi(raw); err == nil { limit = n }
 		}
 		records, err := s.WeightAudit.Tail(limit)
 		if err != nil {
@@ -96,26 +99,17 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]any{"rfid": s.RFID.Latest(), "lpr": s.LPR.Latest()})
 	})
 	mux.HandleFunc("POST /io/rfid", func(w http.ResponseWriter, r *http.Request) {
-		var in struct {
-			Tag     string  `json:"tag"`
-			Quality float64 `json:"quality"`
-		}
+		var in struct { Tag string `json:"tag"`; Quality float64 `json:"quality"` }
 		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Tag == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tag required"})
-			return
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tag required"}); return
 		}
 		s.RFID.Ingest(in.Tag, in.Quality)
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 	})
 	mux.HandleFunc("POST /io/lpr", func(w http.ResponseWriter, r *http.Request) {
-		var in struct {
-			Plate      string  `json:"plate"`
-			Confidence float64 `json:"confidence"`
-			ImageRef   string  `json:"image_ref"`
-		}
+		var in struct { Plate string `json:"plate"`; Confidence float64 `json:"confidence"`; ImageRef string `json:"image_ref"` }
 		if json.NewDecoder(r.Body).Decode(&in) != nil || in.Plate == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "plate required"})
-			return
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "plate required"}); return
 		}
 		s.LPR.Ingest(in.Plate, in.Confidence, in.ImageRef)
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
@@ -125,46 +119,37 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /sim/position", func(w http.ResponseWriter, r *http.Request) {
 			var p domain.PositionSnapshot
 			if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()}); return
 			}
-			if p.Observed.IsZero() {
-				p.Observed = time.Now().UTC()
-			}
+			if p.Observed.IsZero() { p.Observed = time.Now().UTC() }
 			if err := s.Workflow.ObservePosition(r.Context(), p); err != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}); return
 			}
 			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
 		})
 		mux.HandleFunc("POST /sim/fault", func(w http.ResponseWriter, r *http.Request) {
 			var f domain.Fault
 			if err := json.NewDecoder(r.Body).Decode(&f); err != nil || f.Device == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid device fault required"})
-				return
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "valid device fault required"}); return
 			}
 			if err := s.Workflow.ObserveFault(r.Context(), f); err != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}); return
 			}
 			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
 		})
 		mux.HandleFunc("POST /sim/override", func(w http.ResponseWriter, r *http.Request) {
 			var o domain.Override
 			if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()}); return
 			}
 			if err := s.Workflow.AuthorizeOverride(r.Context(), o); err != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}); return
 			}
 			writeJSON(w, http.StatusAccepted, s.Workflow.Snapshot())
 		})
 		mux.HandleFunc("POST /sim/reset-complete", func(w http.ResponseWriter, _ *http.Request) {
 			if err := s.Workflow.ResetCompleted(); err != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-				return
+				writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()}); return
 			}
 			writeJSON(w, http.StatusOK, s.Workflow.Snapshot())
 		})
