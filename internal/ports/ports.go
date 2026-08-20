@@ -15,6 +15,10 @@ type RawWeightJournal interface {
 	Append(context.Context, domain.RawWeightEvent) error
 }
 
+type AuditStore interface {
+	Append(context.Context, domain.AuditEvent) (domain.AuditRef, error)
+}
+
 type PositionIO interface {
 	ReadInputs(context.Context) (domain.PositionSnapshot, error)
 }
