@@ -1,0 +1,94 @@
+name: Verify Operator UI
+
+on:
+  pull_request:
+    paths:
+      - 'internal/httpapi/web/**'
+      - '.github/workflows/ui-operator.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/httpapi/web/**'
+      - '.github/workflows/ui-operator.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+
+      - name: JavaScript syntax
+        shell: pwsh
+        run: |
+          node --version
+          node --check internal/httpapi/web/operator.js
+
+      - name: Go regression tests
+        run: go test ./...
+
+      - name: Build single Windows binary with embedded UI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          $sha = "${{ github.sha }}"
+          go build -trimpath -ldflags "-s -w -X main.version=0.7.0-ui -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          if (-not (Test-Path out/plantops-edge-scale.exe)) { throw 'EXE missing' }
+
+      - name: Serve and verify embedded UI assets
+        shell: pwsh
+        run: |
+          $db = Join-Path $PWD 'out/ui-ci.db'
+          $raw = Join-Path $PWD 'out/ui-raw.jsonl'
+          $events = Join-Path $PWD 'out/ui-events.jsonl'
+          $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @('-listen','127.0.0.1:8092','-db',$db,'-raw-weight-journal',$raw,'-event-journal',$events) -PassThru
+          try {
+            $ready = $false
+            for ($i=0; $i -lt 50; $i++) {
+              try { $h = Invoke-RestMethod http://127.0.0.1:8092/healthz -TimeoutSec 1; if ($h.status -eq 'ok') { $ready=$true; break } } catch {}
+              Start-Sleep -Milliseconds 150
+            }
+            if (-not $ready) { throw 'Edge runtime did not become healthy' }
+
+            $root = (Invoke-WebRequest http://127.0.0.1:8092/ -UseBasicParsing).Content
+            if ($root -notmatch 'operator.html') { throw 'root page does not route to operator UI' }
+            $html = (Invoke-WebRequest http://127.0.0.1:8092/operator.html -UseBasicParsing).Content
+            $css  = (Invoke-WebRequest http://127.0.0.1:8092/operator.css -UseBasicParsing).Content
+            $js   = (Invoke-WebRequest http://127.0.0.1:8092/operator.js -UseBasicParsing).Content
+            if ($html -notmatch 'UNMANNED WEIGHBRIDGE' -or $html -notmatch 'VISUAL DEMO') { throw 'operator HTML marker missing' }
+            if ($css.Length -lt 10000) { throw "operator CSS unexpectedly small: $($css.Length)" }
+            if ($js.Length -lt 8000 -or $js -notmatch 'Promise.allSettled') { throw 'operator JS incomplete' }
+
+            $edge = $null
+            $candidates = @(
+              "$env:ProgramFiles(x86)\Microsoft\Edge\Application\msedge.exe",
+              "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+            )
+            foreach ($candidate in $candidates) { if ($candidate -and (Test-Path $candidate)) { $edge=$candidate; break } }
+            if (-not $edge) { $cmd = Get-Command msedge.exe -ErrorAction SilentlyContinue; if ($cmd) { $edge=$cmd.Source } }
+            if (-not $edge) { throw 'Microsoft Edge not found on Windows runner' }
+
+            & $edge --headless=new --disable-gpu --hide-scrollbars --window-size=1600,1000 --virtual-time-budget=6500 --screenshot="$PWD\out\operator-ui-demo.png" "http://127.0.0.1:8092/operator.html?demo=1"
+            if (-not (Test-Path out/operator-ui-demo.png)) { throw 'headless browser screenshot missing' }
+            if ((Get-Item out/operator-ui-demo.png).Length -lt 30000) { throw 'headless UI screenshot unexpectedly small' }
+            Write-Host 'Operator UI PASS: embedded assets served and demo executed in Edge headless'
+          } finally {
+            if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+
+      - name: Hash EXE
+        shell: pwsh
+        run: (Get-FileHash out/plantops-edge-scale.exe -Algorithm SHA256).Hash.ToLower() | Set-Content out/plantops-edge-scale.exe.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plantops-edge-scale-operator-ui-${{ github.sha }}
+          path: |
+            out/plantops-edge-scale.exe
+            out/plantops-edge-scale.exe.sha256
+            out/operator-ui-demo.png
