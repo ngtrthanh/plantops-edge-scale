@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/auditjournal"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/ingress"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/jsonl"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/adapters/modbustcp"
@@ -18,6 +19,7 @@ import (
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/engine"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/httpapi"
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/runtimeio"
+	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/workflowaudit"
 )
 
 var (
@@ -31,6 +33,7 @@ func main() {
 
 	scaleAddr := flag.String("scale-addr", "", "scale controller TCP address host:port; empty disables live collector")
 	rawWeightJournal := flag.String("raw-weight-journal", "data/raw-weight.jsonl", "append-only raw weight audit journal path")
+	eventJournal := flag.String("event-journal", "data/events.jsonl", "append-only operational event audit journal path")
 	ticketJournal := flag.String("ticket-journal", "data/tickets.jsonl", "durable local ticket journal path")
 	reconnectDelay := flag.Duration("scale-reconnect-delay", 2*time.Second, "delay before reconnecting to scale controller")
 
@@ -52,9 +55,13 @@ func main() {
 
 	if *ioUnitID > 255 { log.Fatalf("io-unit-id must be 0..255") }
 
-	audit := &rawjournal.Journal{Path: *rawWeightJournal}
-	if err := audit.Verify(); err != nil && !os.IsNotExist(err) {
+	weightAudit := &rawjournal.Journal{Path: *rawWeightJournal}
+	if err := weightAudit.Verify(); err != nil && !os.IsNotExist(err) {
 		log.Fatalf("raw weight audit integrity check failed: %v", err)
+	}
+	eventAudit := &auditjournal.Journal{Path: *eventJournal}
+	if err := eventAudit.Verify(); err != nil && !os.IsNotExist(err) {
+		log.Fatalf("operational event audit integrity check failed: %v", err)
 	}
 
 	vehicleRegistry, err := registry.Parse(*vehicleMap)
@@ -67,6 +74,14 @@ func main() {
 		StableConfirmations: *stableConfirmations,
 		StableToleranceKG: *stableToleranceKG,
 	}, tickets, vehicleRegistry)
+
+	watcher := &workflowaudit.Watcher{
+		Workflow: workflow, Audit: eventAudit, StationID: *stationID,
+		RuntimeGitSHA: gitSHA, Interval: 50*time.Millisecond,
+	}
+	go func() {
+		if err := watcher.Run(context.Background()); err != nil { log.Printf("CRITICAL workflow audit watcher stopped: %v", err) }
+	}()
 
 	rfid := &ingress.RFID{}
 	lpr := &ingress.LPR{}
@@ -83,7 +98,7 @@ func main() {
 			Addr: *scaleAddr,
 			StationID: *stationID,
 			TransactionID: workflow.ActiveTransactionID,
-			Journal: audit,
+			Journal: weightAudit,
 			ReconnectDelay: *reconnectDelay,
 			OnReading: func(a domain.AuditedScaleReading) {
 				scaleMonitor.Reading(a.Reading)
@@ -122,9 +137,19 @@ func main() {
 		}
 		client := &modbustcp.Client{Addr: *ioAddr, UnitID: byte(*ioUnitID), Timeout: *ioTimeout}
 		hardwareIO := &modbustcp.IO{Client: client, Mapping: mapping}
+		auditedOutputs := &runtimeio.AuditedOutputs{
+			Inner: hardwareIO, Audit: eventAudit, StationID: *stationID,
+			RuntimeGitSHA: gitSHA, TransactionID: workflow.ActiveTransactionID,
+			OnAuditFailure: func(err error) {
+				_ = workflow.ObserveFault(context.Background(), domain.Fault{
+					Device:domain.DeviceAuditStore, Health:domain.HealthFault,
+					Reason:"operational audit output gate failed: "+err.Error(), Overridable:false, Critical:true,
+				})
+			},
+		}
 		ioMonitor = runtimeio.NewMonitor(true)
 		controller := &runtimeio.Controller{
-			Workflow: workflow, Inputs: hardwareIO, Outputs: hardwareIO, Monitor: ioMonitor,
+			Workflow: workflow, Inputs: hardwareIO, Outputs: auditedOutputs, Monitor: ioMonitor,
 			PollInterval: *ioPoll, BuzzerPulse: *buzzerPulse,
 			BarrierFeedbackTimeout: *barrierFeedbackTimeout,
 		}
@@ -138,12 +163,13 @@ func main() {
 
 	s := &httpapi.Server{
 		RFID: rfid, LPR: lpr,
-		WeightAudit: audit, ScaleMonitor: scaleMonitor, Workflow: workflow,
+		WeightAudit: weightAudit, EventAudit: eventAudit,
+		ScaleMonitor: scaleMonitor, Workflow: workflow,
 		IOStatus: func() any { return ioMonitor.Snapshot() },
 		AllowSimulation: *simulation,
 		Version: version, GitSHA: gitSHA,
 	}
 	httpServer := &http.Server{Addr: *listen, Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second}
-	log.Printf("plantops-edge-scale Go vNext %s sha=%s listening on http://%s simulation=%v", version, gitSHA, *listen, *simulation)
+	log.Printf("plantops-edge-scale Go vNext %s sha=%s listening on http://%s simulation=%v event_audit=%s", version, gitSHA, *listen, *simulation, *eventJournal)
 	log.Fatal(httpServer.ListenAndServe())
 }
