@@ -2,6 +2,7 @@ package scaleascii
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -15,11 +16,12 @@ type streamMemoryJournal struct {
 	events []domain.RawWeightEvent
 }
 
-func (m *streamMemoryJournal) Append(_ context.Context, e domain.RawWeightEvent) error {
+func (m *streamMemoryJournal) AppendRecord(_ context.Context, e domain.RawWeightEvent) (domain.RawWeightRef, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.events = append(m.events, e)
-	return nil
+	seq := uint64(len(m.events))
+	return domain.RawWeightRef{Seq: seq, Hash: fmt.Sprintf("hash-%d", seq)}, nil
 }
 
 func (m *streamMemoryJournal) snapshot() []domain.RawWeightEvent {
@@ -55,12 +57,12 @@ func TestStreamCollectorAuditsEveryFrameBeforePublishing(t *testing.T) {
 	defer cancel()
 	j := &streamMemoryJournal{}
 	var mu sync.Mutex
-	published := make([]domain.ScaleReading, 0, 3)
+	published := make([]domain.AuditedScaleReading, 0, 3)
 
 	collector := &StreamCollector{
 		Addr: ln.Addr().String(), StationID: "S01", Journal: j,
 		ReconnectDelay: time.Second,
-		OnReading: func(r domain.ScaleReading) {
+		OnReading: func(r domain.AuditedScaleReading) {
 			mu.Lock()
 			published = append(published, r)
 			count := len(published)
@@ -92,6 +94,12 @@ func TestStreamCollectorAuditsEveryFrameBeforePublishing(t *testing.T) {
 		}
 		if frames[i].ReceivedAtUTC.IsZero() || frames[i].RawBase64 == "" {
 			t.Fatalf("frame %d missing audit timestamp/raw bytes: %+v", i, frames[i])
+		}
+		if published[i].Reading.WeightKG != want {
+			t.Fatalf("published %d weight=%d want=%d", i, published[i].Reading.WeightKG, want)
+		}
+		if published[i].RawRef.Seq != uint64(i+1) || published[i].RawRef.Hash == "" {
+			t.Fatalf("published %d missing immutable raw audit ref: %+v", i, published[i])
 		}
 	}
 	if frames[2].Stable == nil || !*frames[2].Stable {
