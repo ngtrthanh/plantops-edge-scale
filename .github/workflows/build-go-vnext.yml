@@ -27,12 +27,46 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
           $sha = "${{ github.sha }}"
-          go build -trimpath -ldflags "-s -w -X main.version=0.1.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+          go build -trimpath -ldflags "-s -w -X main.version=0.2.0 -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw "exe missing" }
-      - name: Runtime smoke
+      - name: Runtime + raw weight audit smoke
         shell: pwsh
         run: |
-          $p = Start-Process .\out\plantops-edge-scale.exe -PassThru
+          $auditPath = Join-Path $PWD 'out/raw-weight-ci.jsonl'
+          Remove-Item $auditPath -ErrorAction SilentlyContinue
+
+          $scaleJob = Start-Job -ScriptBlock {
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 19001)
+            $listener.Start()
+            try {
+              $client = $listener.AcceptTcpClient()
+              try {
+                $stream = $client.GetStream()
+                foreach ($line in @(
+                  "WT=1200;ST=0;OVERLOAD=0;FAULT=`r`n",
+                  "WT=28420;ST=0;OVERLOAD=0;FAULT=`r`n",
+                  "WT=28460;ST=1;OVERLOAD=0;FAULT=`r`n"
+                )) {
+                  $bytes = [System.Text.Encoding]::ASCII.GetBytes($line)
+                  $stream.Write($bytes, 0, $bytes.Length)
+                  $stream.Flush()
+                  Start-Sleep -Milliseconds 150
+                }
+                Start-Sleep -Seconds 30
+              } finally {
+                $client.Close()
+              }
+            } finally {
+              $listener.Stop()
+            }
+          }
+
+          Start-Sleep -Milliseconds 500
+          $p = Start-Process .\out\plantops-edge-scale.exe -ArgumentList @(
+            '-scale-addr','127.0.0.1:19001',
+            '-station-id','CI-SCALE-01',
+            '-raw-weight-journal',$auditPath
+          ) -PassThru
           try {
             $ok = $false
             for ($i=0; $i -lt 30; $i++) {
@@ -42,13 +76,43 @@ jobs:
               } catch { Start-Sleep -Milliseconds 300 }
             }
             if (-not $ok) { throw "healthz failed" }
+
             Invoke-RestMethod http://127.0.0.1:8080/io/rfid -Method Post -ContentType 'application/json' -Body '{"tag":"RFID-DEMO-001","quality":99}' | Out-Null
             Invoke-RestMethod http://127.0.0.1:8080/io/lpr -Method Post -ContentType 'application/json' -Body '{"plate":"15C-123.45","confidence":98}' | Out-Null
             $id = Invoke-RestMethod http://127.0.0.1:8080/api/identity
             if ($id.rfid.tag -ne 'RFID-DEMO-001') { throw "rfid ingress failed" }
             if ($id.lpr.plate -ne '15C-123.45') { throw "lpr ingress failed" }
+
+            $audited = $false
+            for ($i=0; $i -lt 30; $i++) {
+              $records = @(Invoke-RestMethod 'http://127.0.0.1:8080/api/audit/weights?limit=20')
+              $frames = @($records | Where-Object { $_.event.kind -eq 'FRAME' })
+              if ($frames.Count -ge 3) { $audited = $true; break }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $audited) { throw "raw weight frames were not journaled" }
+
+            $weights = @($frames | ForEach-Object { [int64]$_.event.weight_kg })
+            if ($weights[0] -ne 1200 -or $weights[1] -ne 28420 -or $weights[2] -ne 28460) {
+              throw "raw weight timeline mismatch: $($weights -join ',')"
+            }
+            $stableFrame = $frames | Where-Object { [int64]$_.event.weight_kg -eq 28460 } | Select-Object -First 1
+            if ($null -eq $stableFrame -or -not $stableFrame.event.stable) { throw "stable frame missing" }
+            if ([string]::IsNullOrWhiteSpace($stableFrame.event.raw_base64)) { throw "exact raw bytes missing" }
+            if ($stableFrame.event.station_id -ne 'CI-SCALE-01') { throw "station id missing from raw audit" }
+
+            $verify = Invoke-RestMethod http://127.0.0.1:8080/api/audit/weights/verify
+            if (-not $verify.verified) { throw "raw weight hash chain verification failed" }
+
+            $scale = Invoke-RestMethod http://127.0.0.1:8080/api/scale/status
+            if (-not $scale.enabled) { throw "scale runtime status not enabled" }
+            if ([int64]$scale.last_reading.weight_kg -ne 28460) { throw "latest scale reading mismatch" }
+
+            if (-not (Test-Path $auditPath)) { throw "raw weight journal file missing" }
+            Write-Host "Raw weight audit PASS: $($weights -join ' -> ') kg"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+            if ($scaleJob) { Stop-Job $scaleJob -ErrorAction SilentlyContinue; Remove-Job $scaleJob -Force -ErrorAction SilentlyContinue }
           }
       - name: Hash
         shell: pwsh
