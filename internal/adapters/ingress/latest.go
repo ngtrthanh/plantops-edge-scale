@@ -8,14 +8,21 @@ import (
 )
 
 type RFID struct {
-	mu sync.RWMutex
-	v  domain.RFIDObservation
+	mu            sync.RWMutex
+	v             domain.RFIDObservation
+	OnObservation func(domain.RFIDObservation)
 }
 
-func (r *RFID) Ingest(tag string, quality float64) {
+func (r *RFID) Ingest(tag string, quality float64) domain.RFIDObservation {
+	obs := domain.RFIDObservation{Tag: tag, Quality: quality, Health: domain.HealthHealthy, Observed: time.Now().UTC()}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.v = domain.RFIDObservation{Tag: tag, Quality: quality, Health: domain.HealthHealthy, Observed: time.Now().UTC()}
+	r.v = obs
+	callback := r.OnObservation
+	r.mu.Unlock()
+	if callback != nil {
+		callback(obs)
+	}
+	return obs
 }
 
 func (r *RFID) Latest() domain.RFIDObservation {
@@ -25,14 +32,21 @@ func (r *RFID) Latest() domain.RFIDObservation {
 }
 
 type LPR struct {
-	mu sync.RWMutex
-	v  domain.LPRObservation
+	mu            sync.RWMutex
+	v             domain.LPRObservation
+	OnObservation func(domain.LPRObservation)
 }
 
-func (l *LPR) Ingest(plate string, confidence float64, imageRef string) {
+func (l *LPR) Ingest(plate string, confidence float64, imageRef string) domain.LPRObservation {
+	obs := domain.LPRObservation{Plate: plate, Confidence: confidence, ImageRef: imageRef, Health: domain.HealthHealthy, Observed: time.Now().UTC()}
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.v = domain.LPRObservation{Plate: plate, Confidence: confidence, ImageRef: imageRef, Health: domain.HealthHealthy, Observed: time.Now().UTC()}
+	l.v = obs
+	callback := l.OnObservation
+	l.mu.Unlock()
+	if callback != nil {
+		callback(obs)
+	}
+	return obs
 }
 
 func (l *LPR) Latest() domain.LPRObservation {
