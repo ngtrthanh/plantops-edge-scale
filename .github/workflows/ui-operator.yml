@@ -40,7 +40,7 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=0.7.0-ui -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
           if (-not (Test-Path out/plantops-edge-scale.exe)) { throw 'EXE missing' }
 
-      - name: Serve and verify embedded UI assets
+      - name: Serve and verify embedded UI in Chromium
         shell: pwsh
         run: |
           $db = Join-Path $PWD 'out/ui-ci.db'
@@ -77,30 +77,27 @@ jobs:
             }
             if (-not $browser) { throw 'No Chromium browser found on Windows runner' }
 
-            $shot = Join-Path $PWD 'out\operator-ui-demo.png'
             $profile = Join-Path $PWD 'out\chrome-headless-profile'
-            Remove-Item $shot,$profile -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $profile -Recurse -Force -ErrorAction SilentlyContinue
             New-Item -ItemType Directory -Force $profile | Out-Null
             $browserArgs = @(
               '--headless',
               '--disable-gpu',
-              '--hide-scrollbars',
               '--no-first-run',
               '--no-default-browser-check',
               '--disable-background-networking',
               "--user-data-dir=$profile",
-              '--window-size=1600,1000',
-              '--screenshot=out/operator-ui-demo.png',
+              '--dump-dom',
               'http://127.0.0.1:8092/operator.html?demo=1&phase=WEIGHING'
             )
             Write-Host "Headless browser: $browser"
-            $global:LASTEXITCODE = $null
-            & $browser @browserArgs
-            if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "headless browser exited $LASTEXITCODE" }
-            for($i=0;$i -lt 20 -and -not (Test-Path $shot);$i++){ Start-Sleep -Milliseconds 250 }
-            if (-not (Test-Path $shot)) { throw 'headless browser screenshot missing' }
-            if ((Get-Item $shot).Length -lt 30000) { throw "headless UI screenshot unexpectedly small: $((Get-Item $shot).Length)" }
-            Write-Host "Operator UI PASS: embedded assets served and demo rendered in $browser"
+            $dom = (& $browser @browserArgs 2>&1 | Out-String)
+            $dom | Set-Content out/operator-ui-rendered.html
+            if ($dom -notmatch 'VISUAL DEMO · NO HARDWARE WRITES') { throw 'browser-rendered demo banner missing' }
+            if ($dom -notmatch '>WEIGHING<') { throw 'browser did not execute demo state transition' }
+            if ($dom -notmatch '28,420 kg') { throw 'browser-rendered weight missing' }
+            if ($dom -notmatch '15C-123.45') { throw 'browser-rendered LPR identity missing' }
+            Write-Host "Operator UI PASS: embedded assets served and JavaScript executed in $browser"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
@@ -115,4 +112,4 @@ jobs:
           path: |
             out/plantops-edge-scale.exe
             out/plantops-edge-scale.exe.sha256
-            out/operator-ui-demo.png
+            out/operator-ui-rendered.html
