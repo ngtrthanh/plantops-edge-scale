@@ -84,20 +84,19 @@ jobs:
               '--disable-gpu',
               '--hide-scrollbars',
               '--window-size=1600,1000',
-              '--virtual-time-budget=6500',
               "--screenshot=$shot",
               'http://127.0.0.1:8092/operator.html?demo=1'
             )
             Write-Host "Headless browser: $browser"
-            $bp = Start-Process -FilePath $browser -ArgumentList $browserArgs -PassThru -Wait
-            if ($bp.ExitCode -ne 0) { throw "headless browser exited $($bp.ExitCode)" }
+            & $browser @browserArgs
+            if ($LASTEXITCODE -ne 0) { throw "headless browser exited $LASTEXITCODE" }
             if (-not (Test-Path $shot)) {
               $fallback = Join-Path $PWD 'screenshot.png'
               if (Test-Path $fallback) { Move-Item $fallback $shot -Force }
             }
             if (-not (Test-Path $shot)) { throw 'headless browser screenshot missing' }
             if ((Get-Item $shot).Length -lt 30000) { throw "headless UI screenshot unexpectedly small: $((Get-Item $shot).Length)" }
-            Write-Host "Operator UI PASS: embedded assets served and demo executed in $browser"
+            Write-Host "Operator UI PASS: embedded assets served and demo rendered in $browser"
           } finally {
             if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
           }
