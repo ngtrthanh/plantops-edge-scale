@@ -55,12 +55,14 @@ internal/domain/          health/mode/ticket/override + raw-weight event model
 internal/ports/           hardware/persistence boundaries
 internal/adapters/
   modbustcp/              dependency-free Modbus TCP DI/coil client
-  scaleascii/             generic TCP scale transport/parser + pre-use raw journaling hook
+  scaleascii/             generic parser + persistent TCP all-frame collector
   rawjournal/             durable append-only hash-chained raw weight JSONL journal
   ingress/                RFID + LPR normalized webhook ingress
   jsonl/                  durable zero-dependency bootstrap ticket store
 internal/httpapi/          embedded API + embedded web UI
 ```
+
+The live scale collector keeps the TCP connection open, journals every received frame before publishing the parsed reading, journals transport errors, and reconnects without resetting the station audit sequence.
 
 The generic scale parser is intentionally not presented as the production scale protocol. A vendor-specific adapter must be written from the real controller manual/sample frames.
 
@@ -72,24 +74,66 @@ go vet ./...
 go run ./cmd/edge
 ```
 
+Run with live scale collection:
+
+```text
+plantops-edge-scale.exe \
+  -station-id WHD-NC \
+  -scale-addr 192.168.1.50:4001 \
+  -raw-weight-journal data/raw-weight.jsonl
+```
+
 Open:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-Current normalized identity ingress:
+Current APIs:
 
 ```text
 POST /io/rfid
 POST /io/lpr
 GET  /api/identity
+GET  /api/scale/status
+GET  /api/audit/weights?limit=200
+GET  /api/audit/weights/verify
 GET  /healthz
 ```
 
+## Raw weight audit path
+
+```text
+scale controller TCP stream
+→ exact controller frame bytes
+→ received_at_utc
+→ append-only hash-chained raw journal
+→ parse weight/stable/fault
+→ publish normalized reading
+→ future state machine
+```
+
+Raw logging is station-continuous. Frames outside an active ticket are still retained; when the state engine exists it will attach the active `transaction_id` without changing the continuous station sequence.
+
+Existing journal integrity is verified at process startup. A broken hash chain is not silently repaired.
+
 ## CI
 
-`.github/workflows/build-go-vnext.yml` runs tests/vet on a GitHub-hosted Windows runner, builds one Windows executable, launches it, verifies `/healthz`, injects RFID/LPR events, verifies normalized identity output, hashes the EXE, and uploads an immutable artifact.
+`.github/workflows/build-go-vnext.yml` runs tests/vet on a GitHub-hosted Windows runner, builds one Windows executable, launches a TCP scale simulator, runs the EXE against that socket, and verifies:
+
+```text
+/healthz
+RFID/LPR ingress
+continuous scale collector
+1200 → 28420 → 28460 kg raw timeline
+stable=true on final frame
+exact raw bytes retained
+station ID retained
+hash-chain verification
+live scale status
+```
+
+It then hashes the EXE and uploads an immutable artifact.
 
 Target artifact:
 
@@ -117,8 +161,9 @@ The Edge app coordinates business workflow. It does not replace certified weighi
 
 ```text
 Phase 0  C# behavioral reference                DONE
-Phase 1  Go skeleton + adapter boundaries       IN PROGRESS
-Phase 1A raw weight audit journal               IMPLEMENTED BASELINE
+Phase 1  Go skeleton + adapter boundaries       BASELINE DONE
+Phase 1A raw weight audit model/journal         DONE
+Phase 1B continuous raw collector + runtime API IN VERIFICATION
 Phase 2  full Go event/state machine            NEXT
 Phase 3  SQLite persistence                     NEXT
 Phase 4  real scale-controller adapter          NEED PROTOCOL

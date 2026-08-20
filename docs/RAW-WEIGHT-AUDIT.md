@@ -12,8 +12,8 @@ A final ticket weight is not enough to audit a weighing transaction. The Edge mu
 EVERY scale controller frame received by Edge
 → timestamp immediately in UTC
 → preserve exact raw bytes
-→ parse/normalize
 → durably append to raw weight journal
+→ parse/normalize
 → only then expose the parsed reading to business logic
 ```
 
@@ -68,7 +68,7 @@ controller overload/fault frames
 malformed frames
 partial frames when a transport read fails
 connect/read timeout or disconnect events
-recovery/reconnect events when the adapter loop is implemented
+recovery/reconnect events
 ```
 
 Business analytics may downsample a separate derived series; the raw audit stream is never derived from the downsampled data.
@@ -129,6 +129,43 @@ Useful indexes:
 (transaction_id, received_at_utc)
 ```
 
+## Current Go runtime implementation
+
+The Go runtime now has a persistent TCP stream collector rather than reopening the scale connection for every observation.
+
+```text
+-scale-addr host:port
+-station-id WHD-NC
+-raw-weight-journal data/raw-weight.jsonl
+-scale-reconnect-delay 2s
+```
+
+When `-scale-addr` is configured:
+
+```text
+connect once
+→ continuously read newline-delimited controller frames
+→ append each exact frame to journal
+→ parse
+→ publish latest reading/status
+→ on disconnect append TRANSPORT_ERROR
+→ reconnect
+```
+
+If journal append fails, the collector returns a critical error and stops consuming scale readings. HTTP/operator visibility remains available; the state engine must interpret this as `FAULT_LOCKOUT` once Phase 2 is wired.
+
+Existing journal integrity is checked at process startup. A broken chain blocks startup rather than being silently reset/repaired.
+
+Read-only runtime audit APIs:
+
+```text
+GET /api/scale/status
+GET /api/audit/weights?limit=200
+GET /api/audit/weights/verify
+```
+
+The replay API is convenience only. The append-only journal remains the audit authority.
+
 ## Acceptance tests
 
 ```text
@@ -145,13 +182,21 @@ send malformed frame
 
 kill scale TCP connection
 → transport error journaled
+→ reconnect does not reset station sequence
 
 make journal path unwritable/full
 → scale reading cannot be accepted for ticket commit
+→ collector stops / state engine must lock out
 
 modify/delete/reorder a JSONL row
 → Verify() fails hash-chain validation
 
 restart Edge
 → journal sequence/hash chain resumes, not resets
+
+frames outside a transaction
+→ still retained with empty transaction_id
+
+active transaction
+→ transaction_id attached while continuous station sequence remains intact
 ```
