@@ -32,14 +32,14 @@ type Outputs interface {
 }
 
 type Status struct {
-	Enabled       bool                  `json:"enabled"`
-	Connected     bool                  `json:"connected"`
+	Enabled       bool                    `json:"enabled"`
+	Connected     bool                    `json:"connected"`
 	LastInput     domain.PositionSnapshot `json:"last_input"`
-	Desired       domain.DesiredOutputs `json:"desired"`
-	Applied       domain.DesiredOutputs `json:"applied"`
-	LastSuccessAt time.Time             `json:"last_success_at,omitempty"`
-	LastErrorAt   time.Time             `json:"last_error_at,omitempty"`
-	LastError     string                `json:"last_error,omitempty"`
+	Desired       domain.DesiredOutputs   `json:"desired"`
+	Applied       domain.DesiredOutputs   `json:"applied"`
+	LastSuccessAt time.Time               `json:"last_success_at,omitempty"`
+	LastErrorAt   time.Time               `json:"last_error_at,omitempty"`
+	LastError     string                  `json:"last_error,omitempty"`
 }
 
 type Monitor struct {
@@ -67,16 +67,16 @@ type Controller struct {
 	Outputs  Outputs
 	Monitor  *Monitor
 
-	PollInterval          time.Duration
-	BuzzerPulse           time.Duration
+	PollInterval           time.Duration
+	BuzzerPulse            time.Duration
 	BarrierFeedbackTimeout time.Duration
 
-	applied           domain.DesiredOutputs
-	lastDesiredBuzzer bool
-	buzzerUntil       time.Time
-	entryOpenSince    time.Time
-	exitOpenSince     time.Time
-	safeApplied       bool
+	applied         domain.DesiredOutputs
+	lastBuzzerReady bool
+	buzzerUntil     time.Time
+	entryOpenSince  time.Time
+	exitOpenSince   time.Time
+	safeApplied     bool
 }
 
 func (c *Controller) Run(ctx context.Context) error {
@@ -88,13 +88,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	ticker := time.NewTicker(c.pollInterval())
 	defer ticker.Stop()
 	for {
-		if err := c.step(ctx); err != nil && ctx.Err() == nil {
-			// Step failures are converted into workflow faults and retried. A
-			// transient I/O outage must not kill HTTP/operator visibility.
-		}
+		_ = c.step(ctx) // faults are reported into workflow/monitor and retried
 		select {
-		case <-ctx.Done():
-			return nil
+		case <-ctx.Done(): return nil
 		case <-ticker.C:
 		}
 	}
@@ -113,13 +109,6 @@ func (c *Controller) step(ctx context.Context) error {
 	}
 	c.Monitor.input(p)
 
-	if p.EntryBarrierOpen && p.EntryBarrierClosed {
-		c.barrierFault(ctx, domain.DeviceEntryBarrier, "contradictory entry barrier OPEN+CLOSED feedback")
-	}
-	if p.ExitBarrierOpen && p.ExitBarrierClosed {
-		c.barrierFault(ctx, domain.DeviceExitBarrier, "contradictory exit barrier OPEN+CLOSED feedback")
-	}
-
 	if !c.safeApplied {
 		if err := c.Outputs.SafeState(ctx); err != nil {
 			c.Monitor.fault(err)
@@ -130,7 +119,7 @@ func (c *Controller) step(ctx context.Context) error {
 			return err
 		}
 		c.applied = domain.DesiredOutputs{}
-		c.lastDesiredBuzzer = false
+		c.lastBuzzerReady = false
 		c.buzzerUntil = time.Time{}
 		c.entryOpenSince = time.Time{}
 		c.exitOpenSince = time.Time{}
@@ -140,6 +129,23 @@ func (c *Controller) step(ctx context.Context) error {
 
 	_ = c.Workflow.ClearFault(ctx, domain.DeviceRemoteIO)
 	if err := c.Workflow.ObservePosition(ctx, p); err != nil { return err }
+
+	entryContradiction := p.EntryBarrierOpen && p.EntryBarrierClosed
+	exitContradiction := p.ExitBarrierOpen && p.ExitBarrierClosed
+	if entryContradiction || exitContradiction {
+		if entryContradiction { c.barrierFault(ctx, domain.DeviceEntryBarrier, "contradictory entry barrier OPEN+CLOSED feedback") }
+		if exitContradiction { c.barrierFault(ctx, domain.DeviceExitBarrier, "contradictory exit barrier OPEN+CLOSED feedback") }
+		// Drop every software permissive request. Do not continue into reconcile,
+		// otherwise an OPEN bit could clear the contradiction in this same poll.
+		if err := c.Outputs.SafeState(ctx); err != nil { return c.ioFault(ctx, err) }
+		c.applied = domain.DesiredOutputs{}
+		c.lastBuzzerReady = false
+		c.buzzerUntil = time.Time{}
+		c.entryOpenSince = time.Time{}
+		c.exitOpenSince = time.Time{}
+		c.Monitor.applied(c.applied)
+		return nil
+	}
 
 	snap := c.Workflow.Snapshot()
 	desired := domain.DesiredOutputs{}
@@ -151,8 +157,8 @@ func (c *Controller) step(ctx context.Context) error {
 func (c *Controller) reconcile(ctx context.Context, desired domain.DesiredOutputs, p domain.PositionSnapshot) error {
 	now := time.Now().UTC()
 
-	// Barrier requests are applied before permissive GREEN. When closing/drop-
-	// request, GREEN is removed first.
+	// Apply barrier requests before permissive GREEN. When removing an OPEN
+	// request, remove GREEN first.
 	if desired.EntryBarrierOpen != c.applied.EntryBarrierOpen {
 		if !desired.EntryBarrierOpen && c.applied.EntryGreen {
 			if err := c.Outputs.SetEntryLight(ctx, false); err != nil { return c.ioFault(ctx, err) }
@@ -172,8 +178,8 @@ func (c *Controller) reconcile(ctx context.Context, desired domain.DesiredOutput
 		if desired.ExitBarrierOpen { c.exitOpenSince = now } else { c.exitOpenSince = time.Time{} }
 	}
 
-	// GREEN is physically gated by barrier OPEN feedback. Domain authorization
-	// alone cannot illuminate a permissive signal before the boom is open.
+	// A permissive signal requires physical OPEN feedback, not only domain
+	// authorization.
 	entryGreen := desired.EntryGreen && (!desired.EntryBarrierOpen || p.EntryBarrierOpen)
 	exitGreen := desired.ExitGreen && (!desired.ExitBarrierOpen || p.ExitBarrierOpen)
 	if entryGreen != c.applied.EntryGreen {
@@ -185,11 +191,12 @@ func (c *Controller) reconcile(ctx context.Context, desired domain.DesiredOutput
 		c.applied.ExitGreen = exitGreen
 	}
 
-	// Buzzer is edge-triggered: a desired false->true transition creates one
-	// bounded pulse even if the engine keeps Buzzer=true throughout release.
-	if desired.Buzzer && !c.lastDesiredBuzzer { c.buzzerUntil = now.Add(c.buzzerPulse()) }
-	if !desired.Buzzer { c.buzzerUntil = time.Time{} }
-	c.lastDesiredBuzzer = desired.Buzzer
+	// Release buzzer is also feedback-gated. It pulses only when the exit boom
+	// is confirmed open, never merely because the engine requested OPEN.
+	buzzerReady := desired.Buzzer && (!desired.ExitBarrierOpen || p.ExitBarrierOpen)
+	if buzzerReady && !c.lastBuzzerReady { c.buzzerUntil = now.Add(c.buzzerPulse()) }
+	if !buzzerReady { c.buzzerUntil = time.Time{} }
+	c.lastBuzzerReady = buzzerReady
 	buzzerOn := !c.buzzerUntil.IsZero() && now.Before(c.buzzerUntil)
 	if buzzerOn != c.applied.Buzzer {
 		if err := c.Outputs.SetBuzzer(ctx, buzzerOn); err != nil { return c.ioFault(ctx, err) }
