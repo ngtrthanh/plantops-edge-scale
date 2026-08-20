@@ -11,13 +11,17 @@ import (
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/domain"
 )
 
+type RawWeightRecordJournal interface {
+	AppendRecord(context.Context, domain.RawWeightEvent) (domain.RawWeightRef, error)
+}
+
 // StreamCollector keeps one scale connection open and consumes every newline-
 // delimited frame continuously. It is the production-shaped counterpart to the
 // one-shot Reader transport skeleton.
 //
 // Audit ordering is deliberate:
 //
-//   controller bytes -> durable raw journal -> parsed reading callback
+//   controller bytes -> durable raw journal -> AuditedScaleReading callback
 //
 // If the raw journal cannot be written, Run returns an error. An unaudited
 // weight observation must never be allowed to become business/ticket truth.
@@ -25,10 +29,10 @@ type StreamCollector struct {
 	Addr           string
 	StationID      string
 	TransactionID  func() string
-	Journal        RawWeightJournal
+	Journal        RawWeightRecordJournal
 	ReconnectDelay time.Duration
 	DialTimeout    time.Duration
-	OnReading      func(domain.ScaleReading)
+	OnReading      func(domain.AuditedScaleReading)
 	OnFault        func(error)
 }
 
@@ -49,7 +53,7 @@ func (c *StreamCollector) Run(ctx context.Context) error {
 		conn, err := d.DialContext(ctx, "tcp", c.Addr)
 		if err != nil {
 			observed := time.Now().UTC()
-			if jerr := c.Journal.Append(ctx, domain.RawWeightEvent{
+			if _, jerr := c.Journal.AppendRecord(ctx, domain.RawWeightEvent{
 				StationID: c.StationID, TransactionID: c.txID(),
 				Kind: domain.RawWeightTransportError, ReceivedAtUTC: observed,
 				Source: c.Addr, Health: domain.HealthDisconnected,
@@ -104,13 +108,14 @@ func (c *StreamCollector) consume(ctx context.Context, conn net.Conn) error {
 				event.Fault = reading.Fault
 			}
 
-			if err := c.Journal.Append(ctx, event); err != nil {
+			ref, err := c.Journal.AppendRecord(ctx, event)
+			if err != nil {
 				return fmt.Errorf("raw weight audit append: %w", err)
 			}
 			if parseErr != nil {
 				c.fault(parseErr)
 			} else if c.OnReading != nil {
-				c.OnReading(reading)
+				c.OnReading(domain.AuditedScaleReading{Reading: reading, RawRef: ref})
 			}
 		}
 
@@ -121,7 +126,7 @@ func (c *StreamCollector) consume(ctx context.Context, conn net.Conn) error {
 			// If bytes were returned together with the transport error they were
 			// already preserved above as a FRAME. The error itself is a separate
 			// audit fact so reconnect history is reconstructable.
-			if err := c.Journal.Append(ctx, domain.RawWeightEvent{
+			if _, err := c.Journal.AppendRecord(ctx, domain.RawWeightEvent{
 				StationID: c.StationID, TransactionID: c.txID(),
 				Kind: domain.RawWeightTransportError, ReceivedAtUTC: received,
 				Source: c.Addr, Health: domain.HealthDisconnected,
