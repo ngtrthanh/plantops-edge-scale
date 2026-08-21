@@ -191,9 +191,14 @@ func (c *Controller) reconcile(ctx context.Context, desired domain.DesiredOutput
 		c.applied.ExitGreen = exitGreen
 	}
 
-	// Release buzzer is also feedback-gated. It pulses only when the exit boom
-	// is confirmed open, never merely because the engine requested OPEN.
-	buzzerReady := desired.Buzzer && (!desired.ExitBarrierOpen || p.ExitBarrierOpen)
+	// Release buzzer is physical-side agnostic. It can pulse only after every
+	// requested OPEN barrier has actually reported OPEN. This is required for
+	// B->A operation where logical egress is physical side A (Entry* legacy
+	// names), not physical side B.
+	buzzerReady := desired.Buzzer
+	if desired.EntryBarrierOpen { buzzerReady = buzzerReady && p.EntryBarrierOpen }
+	if desired.ExitBarrierOpen { buzzerReady = buzzerReady && p.ExitBarrierOpen }
+	if !desired.EntryBarrierOpen && !desired.ExitBarrierOpen { buzzerReady = false }
 	if buzzerReady && !c.lastBuzzerReady { c.buzzerUntil = now.Add(c.buzzerPulse()) }
 	if !buzzerReady { c.buzzerUntil = time.Time{} }
 	c.lastBuzzerReady = buzzerReady
