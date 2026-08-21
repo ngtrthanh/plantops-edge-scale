@@ -52,7 +52,6 @@ type WeightAcceptance struct {
 	RawRef RawWeightRef `json:"raw_ref"`
 }
 
-// Historical Entry/Exit names are fixed physical side A/B for wire compatibility.
 type DesiredOutputs struct {
 	EntryGreen bool `json:"entry_green"`
 	ExitGreen bool `json:"exit_green"`
@@ -62,7 +61,7 @@ type DesiredOutputs struct {
 }
 
 // Transaction is one short physical pass. Business completion requires the
-// durable two-pass WeighCycle pair and is explicitly represented below.
+// durable two-pass WeighCycle pair.
 type Transaction struct {
 	ID string `json:"id"`
 	StationID string `json:"station_id"`
@@ -81,6 +80,7 @@ type Transaction struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	RFID RFIDObservation `json:"rfid"`
 	LPR LPRObservation `json:"lpr"`
+	CameraEvidence []CameraEvidence `json:"camera_evidence,omitempty"`
 	Identity IdentityStatus `json:"identity"`
 	IdentityReason string `json:"identity_reason,omitempty"`
 	Position PositionStatus `json:"position"`
