@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>PlantOps Edge Scale · Operator</title>
+<link rel="stylesheet" href="/operator.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M3 16h18M5 16V8h14v8M8 8V5h8v3M7 20h10" stroke="#59d8ff" stroke-width="1.6" stroke-linecap="round"/></svg></div><div><b>PLANTOPS EDGE SCALE</b><small>UNMANNED WEIGHBRIDGE · DIGITAL TWIN</small></div></div>
+    <div class="topmeta"><div class="pill"><i id="healthDot" class="dot"></i><span id="healthText">CONNECTING</span></div><div class="pill">STATION&nbsp;<b id="stationTop">EDGE-01</b></div><div class="pill">DB&nbsp;<b id="dbTop">—</b></div><div class="pill">SYNC&nbsp;<b id="syncTop">—</b></div></div>
+    <div class="actions"><button class="btn" id="liveBtn">LIVE</button><button class="btn demo" id="demoBtn">VISUAL DEMO</button></div>
+  </header>
+  <main class="layout">
+    <section class="panel left">
+      <div class="panelhead"><h2>Workflow</h2><span id="txShort">NO ACTIVE TX</span></div>
+      <div class="steps" id="steps"></div>
+      <div class="auditmini"><div class="row"><span>Raw audit</span><b id="rawVerify">—</b></div><div class="row"><span>Event audit</span><b id="eventVerify">—</b></div><div class="row"><span>Runtime SHA</span><b id="shaMini">—</b></div></div>
+    </section>
+    <section class="panel center">
+      <div class="scenehead"><div class="state"><span id="stateBadge" class="statebadge">IDLE</span><span id="modeBadge" class="modebadge">NORMAL</span></div><div class="truth">STATE-DRIVEN ANIMATION · NO UI-SIDE INTERLOCK</div></div>
+      <div class="scene" id="scene">
+        <div id="demoBanner" class="demoBanner">VISUAL DEMO · NO HARDWARE WRITES</div>
+        <div class="skyline"></div><div class="road"></div>
+        <div class="stationtag" id="stationScene">EDGE-01</div>
+        <div class="weightbox"><small>AUTHORITATIVE SCALE</small><div id="weight" class="weight">0 kg</div><small id="weightState">WAITING FOR LIVE FRAME</small></div>
+        <div id="scaleDeck" class="scale"></div>
+        <div id="entryBarrier" class="barrier entry"><div class="post"></div><div class="arm"></div><div id="entryLight" class="light"><i class="lamp"></i></div></div>
+        <div id="exitBarrier" class="barrier exit"><div class="post"></div><div class="arm"></div><div id="exitLight" class="light"><i class="lamp"></i></div></div>
+        <div id="rfid" class="rfid"><div class="mast"></div><div class="head"></div><div class="wave"></div><div class="wave"></div><div class="wave"></div></div>
+        <div id="camera" class="camera"><div class="pole"></div><div class="cam"><i class="lens"></i></div></div>
+        <div id="sEntry" class="sensor s-entry"><span>ENTRY</span></div><div id="sFront" class="sensor s-front"><span>FRONT</span></div><div id="sRear" class="sensor s-rear"><span>REAR</span></div><div id="sExit" class="sensor s-exit"><span>EXIT</span></div>
+        <div id="truck" class="truck"><div class="truckbody"></div><div class="cab"></div><div class="wind"></div><div class="cargo"></div><div id="plateTruck" class="plate">—</div><div class="wheel w1"></div><div class="wheel w2"></div></div>
+        <div class="idtag">RFID <b id="rfidText">—</b>&nbsp;&nbsp;·&nbsp;&nbsp;PLATE <b id="plateText">—</b>&nbsp;&nbsp;·&nbsp;&nbsp;POSITION <b id="positionText">—</b></div>
+      </div>
+      <div class="chartwrap"><div class="charthead"><b>RAW WEIGHT CURVE</b><span id="chartMeta">last 120 audited frames</span></div><svg id="chart" class="chart" viewBox="0 0 1000 120" preserveAspectRatio="none"><line class="chartzero" x1="0" y1="110" x2="1000" y2="110"></line><path id="chartLine" class="chartline"></path><path id="chartStable" class="chartstable"></path><circle id="chartDot" class="chartdot" r="4" cx="0" cy="110"></circle></svg></div>
+    </section>
+    <section class="panel right">
+      <div class="panelhead"><h2>Hardware & Audit</h2><span id="clock">—</span></div>
+      <div class="devices">
+        <div class="device"><div class="dtop"><b>SCALE</b><i id="sigScale" class="sig"></i></div><small id="devScale">DISABLED</small></div>
+        <div class="device"><div class="dtop"><b>REMOTE I/O</b><i id="sigIO" class="sig"></i></div><small id="devIO">DISABLED</small></div>
+        <div class="device"><div class="dtop"><b>RFID</b><i id="sigRFID" class="sig"></i></div><small id="devRFID">WAITING</small></div>
+        <div class="device"><div class="dtop"><b>LPR CAMERA</b><i id="sigLPR" class="sig"></i></div><small id="devLPR">WAITING</small></div>
+      </div>
+      <div class="metricgrid"><div class="metric"><label>Tickets</label><strong id="tickets">0</strong></div><div class="metric"><label>Pending Sync</label><strong id="pending">0</strong></div><div class="metric"><label>Raw Frames</label><strong id="rawCount">0</strong></div><div class="metric"><label>Event Seq</label><strong id="eventSeq">0</strong></div></div>
+      <div class="timeline" id="timeline"><div class="empty">Waiting for operational audit events…</div></div>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="/operator.js"></script>
+<script>addEventListener('load',()=>{if(new URLSearchParams(location.search).get('demo')==='1')document.getElementById('demoBtn').click()})</script>
+</body>
+</html>
