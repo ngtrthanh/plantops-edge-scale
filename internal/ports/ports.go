@@ -43,8 +43,21 @@ type VehicleRegistry interface {
 	ResolveRFID(context.Context, string) (domain.VehicleIdentity, bool, error)
 }
 
+// TicketStore is retained for the current one-pass engine during migration.
+// The authoritative two-pass business path uses CycleStore and only creates a
+// final ticket in CompleteCycle after a valid A->B / B->A pair.
 type TicketStore interface {
 	Commit(context.Context, domain.Ticket) error
+}
+
+type CycleStore interface {
+	OpenCycle(context.Context, domain.WeighCycle) error
+	CallCycle(context.Context, string, time.Time) error
+	GetCycle(context.Context, string) (domain.WeighCycle, bool, error)
+	FindCalledCycle(context.Context, string, string) (domain.WeighCycle, bool, error)
+	ListQueue(context.Context) ([]domain.WeighCycle, error)
+	CompleteCycle(context.Context, domain.WeighCycle, domain.Ticket) error
+	MarkCycleStatus(context.Context, string, domain.CycleStatus, string, time.Time) error
 }
 
 type CentralSync interface {

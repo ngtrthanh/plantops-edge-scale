@@ -29,6 +29,11 @@ type Workflow interface {
 	ResetCompleted() error
 }
 
+type CycleQueue interface {
+	Queue(context.Context) ([]domain.WeighCycle, error)
+	Call(context.Context, string) error
+}
+
 type Server struct {
 	RFID            *ingress.RFID
 	LPR             *ingress.LPR
@@ -36,6 +41,7 @@ type Server struct {
 	EventAudit      *auditjournal.Journal
 	ScaleMonitor    *scaleascii.Monitor
 	Workflow        Workflow
+	Cycles          CycleQueue
 	IOStatus        func() any
 	StorageStatus   func(context.Context) (any,error)
 	AllowSimulation bool
@@ -46,7 +52,7 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	mux:=http.NewServeMux()
 	mux.HandleFunc("GET /healthz",func(w http.ResponseWriter,r *http.Request){
-		payload:=map[string]any{"status":"ok","service":"plantops-edge-scale-go","version":s.Version,"git_sha":s.GitSHA,"utc":time.Now().UTC(),"event_audit_configured":s.EventAudit!=nil}
+		payload:=map[string]any{"status":"ok","service":"plantops-edge-scale-go","version":s.Version,"git_sha":s.GitSHA,"utc":time.Now().UTC(),"event_audit_configured":s.EventAudit!=nil,"two_pass_cycle":s.Cycles!=nil}
 		if s.ScaleMonitor!=nil{payload["scale"]=s.ScaleMonitor.Snapshot()}
 		if s.Workflow!=nil{payload["workflow"]=s.Workflow.Snapshot()}
 		if s.IOStatus!=nil{payload["io"]=s.IOStatus()}
@@ -57,6 +63,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/io/status",func(w http.ResponseWriter,_ *http.Request){if s.IOStatus==nil{writeJSON(w,http.StatusOK,map[string]any{"enabled":false});return};writeJSON(w,http.StatusOK,s.IOStatus())})
 	mux.HandleFunc("GET /api/scale/status",func(w http.ResponseWriter,_ *http.Request){if s.ScaleMonitor==nil{writeJSON(w,http.StatusOK,map[string]any{"enabled":false});return};writeJSON(w,http.StatusOK,s.ScaleMonitor.Snapshot())})
 	mux.HandleFunc("GET /api/storage/status",func(w http.ResponseWriter,r *http.Request){if s.StorageStatus==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"storage not configured"});return};st,err:=s.StorageStatus(r.Context());if err!=nil{writeJSON(w,http.StatusInternalServerError,map[string]string{"error":err.Error()});return};writeJSON(w,http.StatusOK,st)})
+
+	mux.HandleFunc("GET /api/queue",func(w http.ResponseWriter,r *http.Request){
+		if s.Cycles==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"two-pass cycle coordinator not configured"});return}
+		items,err:=s.Cycles.Queue(r.Context());if err!=nil{writeJSON(w,http.StatusInternalServerError,map[string]string{"error":err.Error()});return}
+		writeJSON(w,http.StatusOK,map[string]any{"count":len(items),"items":items})
+	})
+	mux.HandleFunc("POST /api/queue/{cycleID}/call",func(w http.ResponseWriter,r *http.Request){
+		if s.Cycles==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"two-pass cycle coordinator not configured"});return}
+		id:=r.PathValue("cycleID");if id==""{writeJSON(w,http.StatusBadRequest,map[string]string{"error":"cycle id required"});return}
+		if err:=s.Cycles.Call(r.Context(),id);err!=nil{writeJSON(w,http.StatusConflict,map[string]string{"error":err.Error()});return}
+		items,err:=s.Cycles.Queue(r.Context());if err!=nil{writeJSON(w,http.StatusAccepted,map[string]any{"status":"called","cycle_id":id});return}
+		writeJSON(w,http.StatusAccepted,map[string]any{"status":"called","cycle_id":id,"count":len(items),"items":items})
+	})
 
 	mux.HandleFunc("GET /api/audit/weights",func(w http.ResponseWriter,r *http.Request){if s.WeightAudit==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"raw weight audit not configured"});return};records,err:=s.WeightAudit.Tail(parseLimit(r,200));if err!=nil{writeJSON(w,http.StatusInternalServerError,map[string]string{"error":err.Error()});return};writeJSON(w,http.StatusOK,map[string]any{"count":len(records),"records":records})})
 	mux.HandleFunc("GET /api/audit/weights/verify",func(w http.ResponseWriter,_ *http.Request){if s.WeightAudit==nil{writeJSON(w,http.StatusServiceUnavailable,map[string]string{"error":"raw weight audit not configured"});return};writeVerify(w,s.WeightAudit.Verify())})

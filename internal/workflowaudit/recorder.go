@@ -14,12 +14,25 @@ import (
 	"github.com/ngtrthanh/plantops-edge-scale/goedge/internal/ports"
 )
 
-// Recorder wraps the deterministic Engine and synchronously records the
-// meaningful before/after changes caused by every domain call. Fast RFID/LPR,
-// identity and state transitions therefore cannot disappear between polling
-// ticks because there is no audit polling loop.
+type Workflow interface {
+	Snapshot() engine.Snapshot
+	ActiveTransactionID() string
+	ObservePosition(context.Context, domain.PositionSnapshot) error
+	ObserveRFID(context.Context, domain.RFIDObservation) error
+	ObserveLPR(context.Context, domain.LPRObservation) error
+	ObserveScale(context.Context, domain.AuditedScaleReading) error
+	ObserveFault(context.Context, domain.Fault) error
+	ClearFault(context.Context, domain.DeviceID) error
+	AuthorizeOverride(context.Context, domain.Override) error
+	ResetCompleted() error
+}
+
+// Recorder wraps any deterministic physical-pass workflow and synchronously
+// records meaningful before/after changes caused by every domain call. It is
+// intentionally interface-based so the two-pass bidirectional wrapper can sit
+// between the audited recorder and the proven one-way safety engine.
 type Recorder struct {
-	Engine        *engine.Engine
+	Engine        Workflow
 	Audit         ports.AuditStore
 	StationID     string
 	RuntimeGitSHA string
@@ -63,13 +76,13 @@ func (r *Recorder) append(ctx context.Context,event domain.AuditEvent)error{
 }
 
 func diff(prev,cur engine.Snapshot)[]domain.AuditEvent{
-	out:=make([]domain.AuditEvent,0,10)
+	out:=make([]domain.AuditEvent,0,14)
 	pt,ct:=prev.Transaction,cur.Transaction
 	if pt!=nil && ct==nil{
-		return append(out,domain.AuditEvent{TransactionID:pt.ID,Kind:domain.AuditTransactionReset,Source:"WORKFLOW",Action:"completed transaction reset",OldState:pt.State,NewState:domain.StateIdle})
+		return append(out,domain.AuditEvent{TransactionID:pt.ID,Kind:domain.AuditTransactionReset,Source:"WORKFLOW",Action:"physical pass reset to IDLE",OldState:pt.State,NewState:domain.StateIdle,Data:map[string]any{"direction":pt.Direction,"cycle_id":pt.CycleID,"cycle_status":pt.CycleStatus,"business_complete":pt.BusinessComplete}})
 	}
 	if pt==nil && ct!=nil{
-		out=append(out,domain.AuditEvent{TransactionID:ct.ID,Kind:domain.AuditTransactionStarted,Source:"WORKFLOW",Action:"transaction started",NewState:ct.State})
+		out=append(out,domain.AuditEvent{TransactionID:ct.ID,Kind:domain.AuditTransactionStarted,Source:"WORKFLOW",Action:"physical pass started",NewState:ct.State,Data:map[string]any{"direction":ct.Direction,"pass_number":ct.PassNumber}})
 		pt=&domain.Transaction{ID:ct.ID}
 	}
 	if ct==nil{return out}
@@ -77,18 +90,21 @@ func diff(prev,cur engine.Snapshot)[]domain.AuditEvent{
 	if pt.ID!=txID{return out}
 	if pt.State!=ct.State && pt.State!=""{
 		kind:=domain.AuditStateTransition;if ct.State==domain.StateComplete{kind=domain.AuditTransactionDone}
-		out=append(out,domain.AuditEvent{TransactionID:txID,Kind:kind,Source:"WORKFLOW",Action:"state transition",OldState:pt.State,NewState:ct.State,Reason:ct.LastBlockReason})
+		out=append(out,domain.AuditEvent{TransactionID:txID,Kind:kind,Source:"WORKFLOW",Action:"state transition",OldState:pt.State,NewState:ct.State,Reason:ct.LastBlockReason,Data:map[string]any{"direction":ct.Direction,"pass_number":ct.PassNumber,"cycle_id":ct.CycleID,"cycle_status":ct.CycleStatus,"business_complete":ct.BusinessComplete}})
+	}
+	if pt.Direction!=ct.Direction || pt.PassNumber!=ct.PassNumber || pt.CycleID!=ct.CycleID || pt.CycleStatus!=ct.CycleStatus || pt.BusinessComplete!=ct.BusinessComplete {
+		out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditStateTransition,Source:"CYCLE",Action:"business cycle binding changed",Reason:ct.LastBlockReason,Data:map[string]any{"direction":ct.Direction,"pass_number":ct.PassNumber,"cycle_id":ct.CycleID,"cycle_status":ct.CycleStatus,"business_complete":ct.BusinessComplete}})
 	}
 	if !reflect.DeepEqual(pt.RFID,ct.RFID)&&ct.RFID.Tag!=""{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditRFIDObserved,Source:"RFID",Device:domain.DeviceRFID,Action:"observation",Data:map[string]any{"tag":ct.RFID.Tag,"quality":ct.RFID.Quality,"health":ct.RFID.Health,"observed_at":ct.RFID.Observed}})}
 	if !reflect.DeepEqual(pt.LPR,ct.LPR)&&ct.LPR.Plate!=""{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditLPRObserved,Source:"LPR",Device:domain.DeviceLPR,Action:"observation",Data:map[string]any{"plate":ct.LPR.Plate,"confidence":ct.LPR.Confidence,"image_ref":ct.LPR.ImageRef,"health":ct.LPR.Health,"observed_at":ct.LPR.Observed}})}
-	if pt.Identity!=ct.Identity||pt.IdentityReason!=ct.IdentityReason{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditIdentityDecision,Source:"WORKFLOW",Action:string(ct.Identity),Reason:ct.IdentityReason,Data:map[string]any{"rfid":ct.RFID.Tag,"plate":ct.LPR.Plate}})}
-	if pt.Position!=ct.Position||!reflect.DeepEqual(pt.PositionSnapshot,ct.PositionSnapshot){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditPositionDecision,Source:"WORKFLOW",Action:string(ct.Position),Data:map[string]any{"position":ct.PositionSnapshot}})}
+	if pt.Identity!=ct.Identity||pt.IdentityReason!=ct.IdentityReason{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditIdentityDecision,Source:"WORKFLOW",Action:string(ct.Identity),Reason:ct.IdentityReason,Data:map[string]any{"rfid":ct.RFID.Tag,"plate":ct.LPR.Plate,"direction":ct.Direction,"cycle_id":ct.CycleID}})}
+	if pt.Position!=ct.Position||!reflect.DeepEqual(pt.PositionSnapshot,ct.PositionSnapshot){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditPositionDecision,Source:"WORKFLOW",Action:string(ct.Position),Data:map[string]any{"position":ct.PositionSnapshot,"direction":ct.Direction}})}
 	for _,f:=range addedFaults(pt.Faults,ct.Faults){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditFaultSet,Source:"WORKFLOW",Device:f.Device,Action:"fault set",Reason:f.Reason,Data:map[string]any{"health":f.Health,"critical":f.Critical,"overridable":f.Overridable}})}
 	for _,f:=range removedFaults(pt.Faults,ct.Faults){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditFaultCleared,Source:"WORKFLOW",Device:f.Device,Action:"fault cleared",Reason:f.Reason})}
 	if len(ct.Overrides)>len(pt.Overrides){for _,o:=range ct.Overrides[len(pt.Overrides):]{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditOverrideAuthorized,Source:"WORKFLOW",Device:o.Device,Actor:o.AuthorizedBy,Action:"override authorized",Reason:o.Reason,Evidence:append([]string(nil),o.Evidence...),Data:map[string]any{"requested_by":o.RequestedBy,"authorized_as":o.AuthorizedAs,"authorized_at":o.AuthorizedAt}})}}
-	if pt.AcceptedWeight==nil&&ct.AcceptedWeight!=nil{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditStableAccepted,Source:"SCALE",Device:domain.DeviceScale,Action:"stable weight accepted",Data:map[string]any{"weight_kg":ct.AcceptedWeight.WeightKG,"observed_at":ct.AcceptedWeight.ObservedAt,"raw_seq":ct.AcceptedWeight.RawRef.Seq,"raw_hash":ct.AcceptedWeight.RawRef.Hash}})}
-	if pt.TicketID==""&&ct.TicketID!=""{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditTicketCommitted,Source:"WORKFLOW",Action:"local durable ticket committed",Data:map[string]any{"ticket_id":ct.TicketID,"committed_at":ct.LocalCommittedAt}})}
-	if !reflect.DeepEqual(pt.Outputs,ct.Outputs){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditDesiredOutputs,Source:"WORKFLOW",Action:"desired outputs changed",Data:map[string]any{"before":pt.Outputs,"after":ct.Outputs}})}
+	if pt.AcceptedWeight==nil&&ct.AcceptedWeight!=nil{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditStableAccepted,Source:"SCALE",Device:domain.DeviceScale,Action:"stable pass weight accepted",Data:map[string]any{"weight_kg":ct.AcceptedWeight.WeightKG,"observed_at":ct.AcceptedWeight.ObservedAt,"raw_seq":ct.AcceptedWeight.RawRef.Seq,"raw_hash":ct.AcceptedWeight.RawRef.Hash,"direction":ct.Direction,"pass_number":ct.PassNumber,"cycle_id":ct.CycleID}})}
+	if pt.TicketID==""&&ct.TicketID!=""{out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditTicketCommitted,Source:"CYCLE",Action:"final paired business ticket committed",Data:map[string]any{"ticket_id":ct.TicketID,"cycle_id":ct.CycleID,"cycle_status":ct.CycleStatus,"business_complete":ct.BusinessComplete,"committed_at":ct.LocalCommittedAt}})}
+	if !reflect.DeepEqual(pt.Outputs,ct.Outputs){out=append(out,domain.AuditEvent{TransactionID:txID,Kind:domain.AuditDesiredOutputs,Source:"WORKFLOW",Action:"desired outputs changed",Data:map[string]any{"before":pt.Outputs,"after":ct.Outputs,"direction":ct.Direction}})}
 	return out
 }
 

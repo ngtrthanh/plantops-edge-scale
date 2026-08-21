@@ -9,11 +9,13 @@ const (
 	StateApproach         WorkflowState = "APPROACH"
 	StateIdentifying      WorkflowState = "IDENTIFYING"
 	StateIdentityMismatch WorkflowState = "IDENTITY_MISMATCH"
+	StateQueueMismatch    WorkflowState = "QUEUE_MISMATCH"
 	StateEntryAuthorized  WorkflowState = "ENTRY_AUTHORIZED"
 	StateEntering         WorkflowState = "ENTERING"
 	StatePositioning      WorkflowState = "POSITIONING"
 	StateReadyToWeigh     WorkflowState = "READY_TO_WEIGH"
 	StateWeighing         WorkflowState = "WEIGHING"
+	StatePairInvalid      WorkflowState = "PAIR_INVALID"
 	StateLocalCommitted   WorkflowState = "LOCAL_COMMITTED"
 	StateExitAuthorized   WorkflowState = "EXIT_AUTHORIZED"
 	StateExiting          WorkflowState = "EXITING"
@@ -55,6 +57,11 @@ type WeightAcceptance struct {
 	RawRef     RawWeightRef `json:"raw_ref"`
 }
 
+// DesiredOutputs keeps the historic Entry/Exit names for wire compatibility.
+// In the two-way physical workflow they mean fixed physical side A / side B:
+//   Entry* = SIDE A barrier/light
+//   Exit*  = SIDE B barrier/light
+// The engine maps logical ingress/egress to these sides from Transaction.Direction.
 type DesiredOutputs struct {
 	EntryGreen       bool `json:"entry_green"`
 	ExitGreen        bool `json:"exit_green"`
@@ -63,28 +70,36 @@ type DesiredOutputs struct {
 	ExitBarrierOpen  bool `json:"exit_barrier_open"`
 }
 
+// Transaction is a short-lived physical pass session. It is deliberately not
+// the long-lived business WeighCycle. A first pass may complete physically and
+// return this state machine to IDLE while its durable cycle remains QUEUED.
 type Transaction struct {
-	ID                 string                 `json:"id"`
-	StationID          string                 `json:"station_id"`
-	State              WorkflowState          `json:"state"`
-	Mode               Mode                   `json:"mode"`
-	StartedAt          time.Time              `json:"started_at"`
-	UpdatedAt          time.Time              `json:"updated_at"`
-	RFID               RFIDObservation        `json:"rfid"`
-	LPR                LPRObservation         `json:"lpr"`
-	Identity           IdentityStatus         `json:"identity"`
-	IdentityReason     string                 `json:"identity_reason,omitempty"`
-	Position           PositionStatus         `json:"position"`
-	PositionSnapshot   PositionSnapshot       `json:"position_snapshot"`
-	LatestScale        *AuditedScaleReading   `json:"latest_scale,omitempty"`
-	AcceptedWeight     *WeightAcceptance      `json:"accepted_weight,omitempty"`
-	StableConfirmations int                   `json:"stable_confirmations"`
-	Faults             []Fault                `json:"faults,omitempty"`
-	Overrides          []Override             `json:"overrides,omitempty"`
-	TicketID           string                 `json:"ticket_id,omitempty"`
-	LocalCommittedAt   *time.Time             `json:"local_committed_at,omitempty"`
-	ExitSeen           bool                   `json:"exit_seen"`
-	CompletedAt        *time.Time             `json:"completed_at,omitempty"`
-	LastBlockReason    string                 `json:"last_block_reason,omitempty"`
-	Outputs            DesiredOutputs         `json:"outputs"`
+	ID                  string                `json:"id"`
+	StationID           string                `json:"station_id"`
+	State               WorkflowState         `json:"state"`
+	Mode                Mode                  `json:"mode"`
+	Direction           Direction             `json:"direction"`
+	PassNumber           PassNumber            `json:"pass_number"`
+	CycleID              string                `json:"cycle_id,omitempty"`
+	CycleStatus          CycleStatus            `json:"cycle_status,omitempty"`
+	BusinessComplete     bool                  `json:"business_complete"`
+	StartedAt           time.Time              `json:"started_at"`
+	UpdatedAt           time.Time              `json:"updated_at"`
+	RFID                RFIDObservation        `json:"rfid"`
+	LPR                 LPRObservation         `json:"lpr"`
+	Identity            IdentityStatus         `json:"identity"`
+	IdentityReason      string                 `json:"identity_reason,omitempty"`
+	Position            PositionStatus         `json:"position"`
+	PositionSnapshot    PositionSnapshot       `json:"position_snapshot"`
+	LatestScale         *AuditedScaleReading   `json:"latest_scale,omitempty"`
+	AcceptedWeight      *WeightAcceptance      `json:"accepted_weight,omitempty"`
+	StableConfirmations int                    `json:"stable_confirmations"`
+	Faults              []Fault                `json:"faults,omitempty"`
+	Overrides           []Override             `json:"overrides,omitempty"`
+	TicketID            string                 `json:"ticket_id,omitempty"`
+	LocalCommittedAt    *time.Time             `json:"local_committed_at,omitempty"`
+	ExitSeen            bool                   `json:"exit_seen"`
+	CompletedAt         *time.Time             `json:"completed_at,omitempty"`
+	LastBlockReason     string                 `json:"last_block_reason,omitempty"`
+	Outputs             DesiredOutputs         `json:"outputs"`
 }

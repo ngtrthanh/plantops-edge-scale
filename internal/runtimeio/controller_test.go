@@ -66,18 +66,44 @@ func TestRemoteIOFailureBecomesCriticalFaultAndRequiresSafeReinit(t *testing.T){
 	if out.safeCalls!=1 { t.Fatalf("SafeState calls=%d want 1",out.safeCalls) }
 }
 
-func TestBuzzerDesiredTrueCreatesBoundedSinglePulse(t *testing.T){
-	wf:=&fakeWorkflow{snap:engine.Snapshot{Transaction:&domain.Transaction{Outputs:domain.DesiredOutputs{Buzzer:true}}}}
+func TestBuzzerNeedsRequestedBarrierOpenFeedback(t *testing.T){
+	wf:=&fakeWorkflow{snap:engine.Snapshot{Transaction:&domain.Transaction{Outputs:domain.DesiredOutputs{Buzzer:true,ExitBarrierOpen:true}}}}
 	in:=&fakeInputs{p:domain.PositionSnapshot{EntryBarrierClosed:true,ExitBarrierClosed:true,SafetyClear:true}}
 	out:=&fakeOutputs{}
 	c:=&Controller{Workflow:wf,Inputs:in,Outputs:out,Monitor:NewMonitor(true),BuzzerPulse:time.Millisecond}
 	if err:=c.step(context.Background()); err!=nil { t.Fatal(err) }
-	if !out.buzzer { t.Fatal("buzzer pulse did not start") }
+	if out.buzzer { t.Fatal("buzzer must not start before requested exit barrier confirms OPEN") }
+	in.p.ExitBarrierClosed=false;in.p.ExitBarrierOpen=true
+	if err:=c.step(context.Background()); err!=nil { t.Fatal(err) }
+	if !out.buzzer { t.Fatal("buzzer pulse did not start after exit OPEN feedback") }
 	time.Sleep(3*time.Millisecond)
 	if err:=c.step(context.Background()); err!=nil { t.Fatal(err) }
 	if out.buzzer { t.Fatal("buzzer must switch off after bounded pulse") }
 	if err:=c.step(context.Background()); err!=nil { t.Fatal(err) }
 	if out.buzzer { t.Fatal("persistent desired=true must not retrigger without a false edge") }
+}
+
+func TestBuzzerAlsoGatesOnPhysicalSideAForBToA(t *testing.T){
+	// B->A wrapper maps logical egress to physical side A, represented by the
+	// historic EntryBarrierOpen field. The buzzer must wait for side-A feedback.
+	wf:=&fakeWorkflow{snap:engine.Snapshot{Transaction:&domain.Transaction{Outputs:domain.DesiredOutputs{Buzzer:true,EntryBarrierOpen:true}}}}
+	in:=&fakeInputs{p:domain.PositionSnapshot{EntryBarrierClosed:true,ExitBarrierClosed:true,SafetyClear:true}}
+	out:=&fakeOutputs{}
+	c:=&Controller{Workflow:wf,Inputs:in,Outputs:out,Monitor:NewMonitor(true),BuzzerPulse:time.Second}
+	if err:=c.step(context.Background());err!=nil{t.Fatal(err)}
+	if out.buzzer{t.Fatal("B->A buzzer must wait for physical side-A OPEN feedback")}
+	in.p.EntryBarrierClosed=false;in.p.EntryBarrierOpen=true
+	if err:=c.step(context.Background());err!=nil{t.Fatal(err)}
+	if !out.buzzer{t.Fatal("B->A buzzer should pulse after physical side-A OPEN feedback")}
+}
+
+func TestBuzzerWithoutBarrierRequestIsNeverPermissive(t *testing.T){
+	wf:=&fakeWorkflow{snap:engine.Snapshot{Transaction:&domain.Transaction{Outputs:domain.DesiredOutputs{Buzzer:true}}}}
+	in:=&fakeInputs{p:domain.PositionSnapshot{EntryBarrierClosed:true,ExitBarrierClosed:true,SafetyClear:true}}
+	out:=&fakeOutputs{}
+	c:=&Controller{Workflow:wf,Inputs:in,Outputs:out,Monitor:NewMonitor(true)}
+	if err:=c.step(context.Background());err!=nil{t.Fatal(err)}
+	if out.buzzer{t.Fatal("buzzer request without a barrier release request must stay off")}
 }
 
 func TestBarrierOpenFeedbackTimeoutFaultsBarrier(t *testing.T){

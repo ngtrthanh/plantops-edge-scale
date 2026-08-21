@@ -101,17 +101,36 @@ type Override struct {
 	ExpiredAt     *time.Time `json:"expired_at,omitempty"`
 }
 
+// Ticket is the final completed business receipt. The paired fields are the
+// authoritative two-pass representation. WeightKG/WeightObservedAt/
+// WeightRawRef remain during migration for the legacy one-pass engine only and
+// must not be interpreted as a completed quantity.
 type Ticket struct {
-	ID                string       `json:"id"`
-	StationID         string       `json:"station_id"`
-	TransactionID     string       `json:"transaction_id"`
-	Plate             string       `json:"plate"`
-	RFID              string       `json:"rfid"`
-	WeightKG          int64        `json:"weight_kg"`
-	WeightObservedAt  time.Time    `json:"weight_observed_at"`
-	WeightRawRef      RawWeightRef `json:"weight_raw_ref"`
-	Mode              Mode         `json:"mode"`
-	Overrides         []Override   `json:"overrides,omitempty"`
-	CommittedAt       time.Time    `json:"committed_at"`
-	SyncedAt          *time.Time   `json:"synced_at,omitempty"`
+	ID            string `json:"id"`
+	StationID     string `json:"station_id"`
+	TransactionID string `json:"transaction_id"`
+	CycleID       string `json:"cycle_id,omitempty"`
+	Plate         string `json:"plate"`
+	RFID          string `json:"rfid"`
+
+	FirstPassID            string       `json:"first_pass_id,omitempty"`
+	SecondPassID           string       `json:"second_pass_id,omitempty"`
+	GrossKG                int64        `json:"gross_kg,omitempty"`
+	TareKG                 int64        `json:"tare_kg,omitempty"`
+	NetKG                  int64        `json:"net_kg,omitempty"`
+	FirstWeightObservedAt  time.Time    `json:"first_weight_observed_at,omitempty"`
+	SecondWeightObservedAt time.Time    `json:"second_weight_observed_at,omitempty"`
+	FirstWeightRawRef      RawWeightRef `json:"first_weight_raw_ref,omitempty"`
+	SecondWeightRawRef     RawWeightRef `json:"second_weight_raw_ref,omitempty"`
+	PairElapsedSeconds     int64        `json:"pair_elapsed_seconds,omitempty"`
+
+	// Legacy one-pass fields. Remove after the two-pass cutover is complete.
+	WeightKG         int64        `json:"weight_kg,omitempty"`
+	WeightObservedAt time.Time    `json:"weight_observed_at,omitempty"`
+	WeightRawRef     RawWeightRef `json:"weight_raw_ref,omitempty"`
+
+	Mode        Mode       `json:"mode"`
+	Overrides   []Override `json:"overrides,omitempty"`
+	CommittedAt time.Time  `json:"committed_at"`
+	SyncedAt    *time.Time `json:"synced_at,omitempty"`
 }
