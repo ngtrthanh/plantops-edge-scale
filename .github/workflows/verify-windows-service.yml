@@ -1,0 +1,77 @@
+name: Verify Windows Service
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  service:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+      - name: Test and build
+        shell: pwsh
+        run: |
+          go mod tidy
+          go test ./...
+          go vet ./...
+          New-Item -ItemType Directory -Force out | Out-Null
+          $sha = "${{ github.sha }}"
+          go build -trimpath -ldflags "-s -w -X main.version=0.9.0-service -X main.gitSHA=$sha" -o out/plantops-edge-scale.exe ./cmd/edge
+      - name: Install start stop restart uninstall via SCM
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path .\out\plantops-edge-scale.exe).Path
+          $data = Join-Path $PWD 'out/service-data'
+          New-Item -ItemType Directory -Force $data | Out-Null
+          $db = Join-Path $data 'edge.db'
+          $weights = Join-Path $data 'raw-weight.jsonl'
+          $events = Join-Path $data 'events.jsonl'
+
+          & $exe -service uninstall 2>$null | Out-Null
+          & $exe -service install -listen 127.0.0.1:18080 -station-id CI-SERVICE-01 -db $db -raw-weight-journal $weights -event-journal $events
+          if ($LASTEXITCODE -ne 0) { throw 'service install failed' }
+          try {
+            & $exe -service start
+            $ready = $false
+            for($i=0;$i -lt 80;$i++){
+              try {
+                $st = (& $exe -service status | Select-Object -Last 1).Trim()
+                $h = Invoke-RestMethod http://127.0.0.1:18080/healthz -TimeoutSec 1
+                if($st -eq 'RUNNING' -and $h.status -eq 'ok' -and $h.two_pass_cycle){$ready=$true;break}
+              } catch {}
+              Start-Sleep -Milliseconds 250
+            }
+            if(-not $ready){throw 'Windows Service did not reach RUNNING + healthz'}
+
+            & $exe -service stop
+            if ($LASTEXITCODE -ne 0) { throw 'service stop failed' }
+            $st = (& $exe -service status | Select-Object -Last 1).Trim()
+            if($st -ne 'STOPPED'){throw "service state after stop=$st"}
+            if(-not (Test-Path $db)){throw 'SQLite edge.db not created under service runtime'}
+
+            & $exe -service start
+            if ($LASTEXITCODE -ne 0) { throw 'service restart failed' }
+            $recovered=$false
+            for($i=0;$i -lt 60;$i++){
+              try {
+                $h=Invoke-RestMethod http://127.0.0.1:18080/healthz -TimeoutSec 1
+                $storage=Invoke-RestMethod http://127.0.0.1:18080/api/storage/status -TimeoutSec 1
+                if($h.status -eq 'ok' -and $storage.integrity -eq 'ok'){$recovered=$true;break}
+              }catch{}
+              Start-Sleep -Milliseconds 250
+            }
+            if(-not $recovered){throw 'service restart/reopen recovery failed'}
+            & $exe -service stop
+          } finally {
+            try { & $exe -service stop 2>$null | Out-Null } catch {}
+            & $exe -service uninstall
+          }
+          Write-Host 'WINDOWS SERVICE PASS: SCM install/start/health/stop/restart/SQLite recovery/uninstall'
