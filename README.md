@@ -1,155 +1,172 @@
 # PlantOps Edge Scale
 
-Offline-first unmanned truck weighbridge Edge controller.
+Offline-first unmanned two-pass truck weighbridge controller.
 
-## Runtime
+## Production shape
 
 ```text
 Windows
 └── plantops-edge-scale.exe
+    ├── native Windows Service host
     ├── embedded HTTP/API + animated operator UI
-    ├── deterministic audited truck workflow
-    ├── scale / Modbus / RFID / LPR adapters
-    ├── embedded pure-Go SQLite business persistence
-    └── durable local audit + Central sync queue
+    ├── two-way physical pass state machine
+    ├── authoritative two-pass business-cycle coordinator
+    ├── scale / Modbus / RFID / LPR / camera adapters
+    ├── embedded pure-Go SQLite
+    ├── raw-weight + operational hash-chained audit
+    └── offline Central sync + heartbeat worker
 ```
 
-Production target: **one Go EXE**. No IIS, Docker Desktop, WSL2, Node, .NET runtime, PostgreSQL service, CGO, SQLite DLL, CDN, or separate frontend server.
+**One Go EXE is the production runtime.** No IIS, Docker Desktop, WSL2, Node, .NET runtime, PostgreSQL service, CGO, SQLite DLL, CDN, or separate frontend server.
 
-Persistent files:
+Persistent state:
 
 ```text
-data/edge.db             tickets + overrides + sync queue + station state
-data/raw-weight.jsonl    all controller frames / exact bytes / hash chain
-data/events.jsonl        decisions + overrides + faults + output command/result hash chain
+data/edge.db             cycles + passes + tickets + overrides + sync queue
+data/raw-weight.jsonl    every scale controller frame, exact bytes, hash chain
+data/events.jsonl        decisions + evidence + faults + output + sync audit chain
 ```
 
-The independent audit journals are intentional: forensic evidence remains directly inspectable and hash-verifiable even if relational storage is unavailable.
-
-## Operator UI
-
-Open the Edge root URL or `/operator.html`.
-
-The operator console is embedded in the Go binary and acts as a state-driven digital twin. It does not invent interlocks in the browser: truck position, barriers, signal lamps, sensors, identity, stable weight and audit data are rendered from backend workflow/I/O truth.
+## Authoritative business cycle
 
 ```text
-LIVE
-├── workflow timeline
-├── animated truck / scale / entry + exit barriers
-├── RFID scan + LPR camera indication
-├── entry / front / rear / exit sensor state
-├── authoritative live/stable weight
-├── raw audited weight curve
-├── hardware connection status
-├── SQLite ticket + pending-sync status
-└── operational audit timeline
+PASS #1  A -> B
+  identity + safety + position
+  audited stable W1 = GROSS
+  -> durable QUEUED cycle
+  -> NO final ticket
+  -> NO completed Central sync
+  -> physical lane returns IDLE
+
+CALL exact queued cycle
+
+PASS #2  B -> A
+  identity must match CALLED cycle
+  audited stable W2 = TARE
+  validate pair
+  NET = W1 - W2 > 0
+  -> atomic COMPLETE + final ticket + clear queue + sync_queue
 ```
 
-`VISUAL DEMO` is client-side presentation only and performs **no hardware writes and no ticket commit**.
+A physical pass may complete while the business cycle remains queued. An orphan, wrong truck, uncalled return, invalid time pair, invalid weight pair, or missing raw audit evidence never becomes a completed transaction.
 
-```text
-/operator.html?demo=1          animated demo from IDLE
-/operator.html?demo=WEIGHING   deterministic held WEIGHING frame for browser CI/preview
-```
+See `docs/TWO-PASS-CYCLE.md`.
 
-Production requires no Node.js. Node is used only by CI for JavaScript syntax validation.
-
-## Design truth
-
-- `docs/EDGE-KNOWLEDGE.md` — operating modes, overrides, lockout and safety rules.
-- `docs/PSEUDOCODE.md` — whole-repo behavior.
-- `docs/RAW-WEIGHT-AUDIT.md` — all-frame scale audit.
-- `docs/EVENT-AUDIT.md` — operational/action audit gate.
-- `docs/HARDWARE-WIRING.md` — topology and commissioning plan.
-- `docs/MODBUS-RUNTIME.md` — Modbus polling/reconciliation and safe-start semantics.
-- `docs/SQLITE-PERSISTENCE.md` — SQLite durability, recovery and sync queue contract.
-- `docs/GO-PORTING.md` — C# → Go cutover record.
-
-## Non-negotiable rules
+## Safety and audit invariants
 
 ```text
 Scale weight/stable/fault authority: NEVER software-overridden.
 Every scale frame: exact bytes + Edge UTC durably journaled before business use.
-Accepted ticket: stores exact raw audit seq/hash.
-Raw audit failure: reading cannot become ticket truth.
-Permissive physical output: durable event intent before Modbus execution.
-Audit failure: permissive action blocked; safe/off action remains allowed.
+Accepted pass weight: exact raw audit seq/hash.
+Raw audit failure: reading cannot become business truth.
 Entry: identity + physical safety + clear deck + audited stable near-zero scale.
 Auxiliary override: transaction-scoped evidence only.
 Critical/unsafe failure: FAULT_LOCKOUT.
-Ticket + override + sync queue: one local SQLite transaction.
-Local durable commit: required before EXIT_AUTHORIZED.
-Central/WAN: never part of local truck-release authorization.
+B->A automatic entry: exact durable CALLED cycle required.
+Final ticket: two valid opposite-direction passes required.
+Permissive physical output: durable audit intent before Modbus execution.
+Audit failure: permissive action blocked; safe/off action remains allowed.
+Central/WAN: never part of local completion or truck release.
 Physical barrier anti-collision/safety: independent of the application process.
-Restart: SafeState first, new engine IDLE, never replay stale permissive command.
-UI: visualization only; browser state never authorizes a physical action.
+Restart: SafeState first; never replay stale permissive commands.
+UI: visualization/control request only; browser state never authorizes hardware.
 ```
 
-## Code map
+## Cameras
+
+Default installed topology:
 
 ```text
-cmd/edge/main.go
-
-internal/domain/          workflow/audit/fault/override contracts
-internal/engine/          deterministic truck state machine
-internal/workflowaudit/   synchronous before/after operational audit recorder
-
-internal/adapters/
-  scaleascii/             persistent scale TCP collector/parser boundary
-  rawjournal/             all-frame raw-weight SHA-256 chain
-  auditjournal/           operational SHA-256 chain
-  sqlitestore/            edge.db TicketStore + sync queue + integrity/recovery
-  modbustcp/              dependency-free Modbus TCP DI/coil adapter
-  ingress/                RFID/LPR normalized ingress
-  registry/               bootstrap RFID -> plate map
-
-internal/runtimeio/       safe-start poller + desired-output reconciler + audit gate
-internal/httpapi/         embedded HTTP API + animated operator UI
+C1A   A-side LPR · A -> B
+C1B   B-side LPR · B -> A
+C3    weighbridge / load overview
 ```
 
-## Truck workflow
+Optional C2/C4 or future cameras are configured, not hard-coded into the domain.
 
 ```text
-IDLE
-→ APPROACH
-→ IDENTIFYING
-→ ENTRY_AUTHORIZED
-→ ENTERING
-→ POSITIONING
-→ READY_TO_WEIGH
-→ WEIGHING
-→ LOCAL_COMMITTED
-→ EXIT_AUTHORIZED
-→ EXITING
-→ COMPLETE
+-camera-ids C1A,C1B,C3
 ```
 
-Critical failure can transition the active transaction to `FAULT_LOCKOUT` at any point.
+LPR and overview image references are attached to the physical pass, persisted into `WeighPass`, and aggregated into the final paired ticket. Camera evidence is also written to the operational audit chain.
 
-## Run
+See `docs/CAMERA-EVIDENCE.md`.
+
+## Operator UI
+
+Open `/` or `/operator.html`.
+
+The embedded console shows:
+
+- animated A->B and B->A truck movement
+- side-A / side-B barriers and physical GREEN feedback
+- C1A / C1B / C3 camera activity
+- RFID/LPR identity
+- front/rear/approach sensors
+- authoritative live/stable weight
+- all-frame raw weight curve
+- physical-pass state
+- business cycle status `QUEUED / CALLED / COMPLETE`
+- active queue with exact `CALL` action
+- gross / tare / net
+- SQLite and Central pending-sync state
+- operational audit timeline
+
+`VISUAL DEMO` performs no hardware writes and no ticket commits.
 
 ```text
-plantops-edge-scale.exe \
-  -station-id WHD-NC \
-  -db data/edge.db \
-  -scale-addr 192.168.1.50:4001 \
-  -io-addr 192.168.1.60:502 \
-  -io-unit-id 1 \
-  -io-map "safety_clear=8" \
-  -raw-weight-journal data/raw-weight.jsonl \
-  -event-journal data/events.jsonl \
-  -vehicle-map "RFID001=15C-123.45"
+/operator.html?demo=1
+/operator.html?demo=WEIGHING
 ```
 
-`-io-addr` empty means no physical Modbus reads/writes. `/sim/*` exists only with explicit `-simulation`.
+## Native Windows Service
 
-## APIs
+```text
+plantops-edge-scale.exe -service install [runtime flags...]
+plantops-edge-scale.exe -service start
+plantops-edge-scale.exe -service status
+plantops-edge-scale.exe -service stop
+plantops-edge-scale.exe -service uninstall
+```
+
+Service configuration:
+
+```text
+Automatic + Delayed Auto Start
+restart after failure: 5s / 15s / 60s
+SCM Stop / Windows shutdown -> SafeState -> HTTP shutdown -> SQLite checkpoint
+```
+
+See `docs/WINDOWS-SERVICE.md`.
+
+## Central sync
+
+Central is optional and asynchronous.
+
+```text
+-central-ticket-url https://central.example/.../tickets
+-central-heartbeat-url https://central.example/.../heartbeat
+-central-token <secret>
+-central-sync-interval 5s
+-central-heartbeat-interval 30s
+-central-timeout 5s
+```
+
+A completed ticket is already locally durable before Central delivery is attempted. Network failure leaves it in `sync_queue` with bounded exponential retry. Bearer secrets are never returned by status API or audit.
+
+See `docs/CENTRAL-SYNC.md`.
+
+## Main APIs
 
 ```text
 GET  /healthz
 GET  /api/workflow
+GET  /api/queue
+POST /api/queue/{cycleID}/call
+GET  /api/tickets/latest
 GET  /api/scale/status
 GET  /api/io/status
+GET  /api/central/status
 GET  /api/storage/status
 GET  /api/identity
 GET  /api/audit/weights?limit=200
@@ -158,92 +175,108 @@ GET  /api/audit/events?limit=200
 GET  /api/audit/events/verify
 POST /io/rfid
 POST /io/lpr
+POST /io/camera/{cameraID}
 ```
+
+`/sim/*` is present only with explicit `-simulation`.
 
 ## Evidence path
 
 ```text
-controller frame bytes
-→ raw-weight fsync + seq/hash
-→ AuditedScaleReading
-→ workflow stable acceptance
-→ SQLite atomic ticket commit
-   ├── ticket exact raw seq/hash
-   ├── override evidence
-   ├── station pointer
+scale controller bytes
+-> raw-weight fsync + seq/hash
+-> AuditedScaleReading
+-> physical pass stable acceptance
+-> WeighPass
+
+PASS1 A->B -> QUEUED
+PASS2 B->A + exact CALLED cycle
+-> pair validation
+-> SQLite atomic COMPLETE
+   ├── first + second raw refs
+   ├── gross / tare / net
+   ├── RFID/LPR
+   ├── C1A/C1B/C3 evidence refs
+   ├── overrides
    └── pending Central sync item
-→ EXIT_AUTHORIZED
+-> local physical release
+-> asynchronous Central ACK
 ```
 
-Physical output path:
+## Code map
 
 ```text
-Engine DesiredOutputs
-→ runtime reconciler
-→ durable OUTPUT_COMMAND intent
-→ Modbus command
-→ physical feedback
-→ OUTPUT_RESULT audit
+cmd/edge/main.go
+internal/domain/          workflow / pair / audit / evidence contracts
+internal/engine/          proven physical-pass state machine
+internal/twopass/         bidirectional normalization + commit bridge
+internal/cycle/           durable queue/call/pair coordinator
+internal/workflowaudit/   synchronous operational audit recorder
+internal/runtimeio/       safe-start Modbus reconciler + output audit gate
+internal/centralsync/     offline retry + ACK + heartbeat
+internal/httpapi/         embedded API + operator UI
+internal/winservice/      native SCM host
+
+internal/adapters/
+  scaleascii/             persistent scale TCP transport/parser boundary
+  rawjournal/             all-frame raw-weight SHA-256 chain
+  auditjournal/           operational SHA-256 chain
+  sqlitestore/            edge.db cycles/passes/tickets/sync queue
+  modbustcp/              dependency-free Modbus TCP DI/coil adapter
+  ingress/                RFID/LPR normalized ingress
+  registry/               bootstrap RFID -> plate map
 ```
-
-GREEN is physically feedback-gated and only illuminates after barrier OPEN feedback.
-
-## SQLite policy
-
-```text
-WAL
-synchronous=FULL
-foreign_keys=ON
-busy_timeout=5000
-startup integrity_check
-single database/sql connection
-```
-
-Central outage leaves `sync_queue` pending but does not block a valid local transaction.
 
 ## Windows CI acceptance
 
-GitHub-hosted Windows CI runs:
+GitHub-hosted Windows runners verify:
 
 ```text
-go mod tidy
 go test ./...
 go vet ./...
-single EXE build
-TCP scale simulator
-all-frame raw audit + exact ticket linkage
-operational hash-chain audit
-Modbus TCP remote-I/O simulator
+single Windows EXE build
+A->B 28,460 kg -> QUEUED, ticket count still 0
+exact CALL
+B->A 11,820 kg -> net 16,640 kg -> COMPLETE
+SQLite restart/recovery
+raw + operational hash-chain integrity
+bidirectional Modbus simulator
 barrier request -> OPEN feedback -> GREEN
-full truck cycle -> 28460 kg -> SQLite commit -> COMPLETE
-SQLite tickets=1 + pending_sync=1 + integrity=ok
-process stop + reopen same edge.db
-reboot state IDLE + durable ticket/queue retained + no I/O replay
-JavaScript syntax validation
-embedded operator assets served by the EXE
-Chromium executes deterministic operator-demo DOM
+permissive outputs off after completion
+Chromium executes embedded operator UI
+native Windows SCM install/start/health/stop/restart/uninstall
+Central HTTP ACK / offline retry tests
+camera C1A/C1B/C3 evidence aggregation tests
 artifact SHA-256
 ```
 
-Test simulators and Node.js are not shipped in the production artifact.
+## Phase status
 
-## Status
+Software phases that can be completed without site-specific hardware are now implemented:
 
 ```text
-Phase 0   C# behavioral reference                         DONE
-Phase 1   Go skeleton + hardware boundaries               DONE
-Phase 1A  all-frame raw-weight audit                      DONE
-Phase 2   audited Go truck workflow engine                DONE
-Phase 2B  Modbus poller + output reconciler               DONE
-Phase 2C  operational/action audit + permissive gate      DONE
-Phase 3   pure-Go SQLite local durability                 DONE
-Phase 4   embedded animated operator digital twin         DONE
-Phase 5   exact scale-controller vendor adapter           NEED REAL PROTOCOL
-Phase 6   real remote-I/O bench integration               NEED HARDWARE
-Phase 7   real RFID/LPR integration                       NEED DEVICE API
-Phase 8   production shadow mode                          SITE STEP
-Phase 9   supervised physical outputs                     SITE STEP
-Phase 10  Go primary / C# retired                         SITE CUTOVER
+S0  C# behavioral reference / migration baseline             DONE
+S1  Go single-binary architecture + hardware ports           DONE
+S2  all-frame raw weight + operational audit                 DONE
+S3  deterministic safety workflow + Modbus reconciliation    DONE
+S4  pure-Go SQLite durability / recovery                     DONE
+S5  embedded animated operator UI                            DONE
+S6  authoritative A->B / B->A two-pass queue/call/net        DONE
+S7  native Windows Service lifecycle                         DONE IN CODE + CI GATE
+S8  C1A/C1B/C3 generic camera evidence contract              DONE IN CODE + CI GATE
+S9  offline Central sync + heartbeat generic adapter         DONE IN CODE + CI GATE
 ```
 
-Software simulation/CI validates the Edge runtime, persistence, audit, workflow, browser UI and Modbus behavior. Exact vendor protocol and physical site commissioning remain hardware-bound and must not be represented as completed without the actual devices/protocol evidence.
+The following are **external commissioning gates**, not unfinished generic software:
+
+```text
+H1  exact real scale-controller protocol parser              BLOCKED: controller manual/raw frames
+H2  real remote-I/O / barriers / sensors bench               BLOCKED: physical hardware
+H3  real RFID + C1A/C1B/C3 vendor integration                BLOCKED: device/API details
+H4  camera/NVR/media object retention + integrity policy     BLOCKED: deployment storage choice
+SITE shadow mode with live traffic                            SITE ACCEPTANCE
+SITE supervised output enablement                             SITE ACCEPTANCE
+SITE Go primary / retire legacy runtime                       SITE CUTOVER
+```
+
+Those gates must not be reported as completed from simulators. The repository is intended to reach them without another architectural rewrite.

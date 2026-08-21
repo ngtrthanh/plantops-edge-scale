@@ -9,6 +9,7 @@ const (
 	AuditStateTransition    AuditKind = "STATE_TRANSITION"
 	AuditRFIDObserved       AuditKind = "RFID_OBSERVED"
 	AuditLPRObserved        AuditKind = "LPR_OBSERVED"
+	AuditCameraEvidence     AuditKind = "CAMERA_EVIDENCE"
 	AuditIdentityDecision   AuditKind = "IDENTITY_DECISION"
 	AuditPositionDecision   AuditKind = "POSITION_DECISION"
 	AuditFaultSet           AuditKind = "FAULT_SET"
@@ -20,6 +21,9 @@ const (
 	AuditOutputCommand      AuditKind = "OUTPUT_COMMAND"
 	AuditOutputResult       AuditKind = "OUTPUT_RESULT"
 	AuditBarrierFeedback    AuditKind = "BARRIER_FEEDBACK"
+	AuditCentralSyncAttempt AuditKind = "CENTRAL_SYNC_ATTEMPT"
+	AuditCentralSyncAck     AuditKind = "CENTRAL_SYNC_ACK"
+	AuditHeartbeat          AuditKind = "HEARTBEAT"
 	AuditTransactionDone    AuditKind = "TRANSACTION_COMPLETED"
 	AuditTransactionReset   AuditKind = "TRANSACTION_RESET"
 )
@@ -29,9 +33,6 @@ type AuditRef struct {
 	Hash string `json:"hash"`
 }
 
-// AuditEvent is the low-volume operational/business audit stream. It is
-// intentionally separate from RawWeightEvent: raw weight keeps every controller
-// frame, while this stream records meaningful decisions, actions and changes.
 type AuditEvent struct {
 	StationID     string         `json:"station_id"`
 	TransactionID string         `json:"transaction_id,omitempty"`

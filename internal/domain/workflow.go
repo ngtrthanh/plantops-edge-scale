@@ -24,82 +24,76 @@ const (
 )
 
 type IdentityStatus string
-
 const (
-	IdentityPending  IdentityStatus = "PENDING"
+	IdentityPending IdentityStatus = "PENDING"
 	IdentityAccepted IdentityStatus = "ACCEPTED"
 	IdentityMismatch IdentityStatus = "MISMATCH"
-	IdentityManual   IdentityStatus = "MANUAL_REQUIRED"
+	IdentityManual IdentityStatus = "MANUAL_REQUIRED"
 )
 
 type PositionStatus string
-
 const (
-	PositionPending  PositionStatus = "PENDING"
+	PositionPending PositionStatus = "PENDING"
 	PositionAccepted PositionStatus = "ACCEPTED"
-	PositionManual   PositionStatus = "MANUAL_REQUIRED"
+	PositionManual PositionStatus = "MANUAL_REQUIRED"
 )
 
 const (
 	EvidencePositionConfirmed = "POSITION_CONFIRMED"
 	EvidenceIdentityConfirmed = "IDENTITY_CONFIRMED"
-	EvidenceExitClear         = "EXIT_CLEAR_CONFIRMED"
+	EvidenceExitClear = "EXIT_CLEAR_CONFIRMED"
 )
 
-type VehicleIdentity struct {
-	RFIDTag string `json:"rfid_tag"`
-	Plate   string `json:"plate"`
-}
+type VehicleIdentity struct { RFIDTag string `json:"rfid_tag"`; Plate string `json:"plate"` }
 
 type WeightAcceptance struct {
-	WeightKG   int64        `json:"weight_kg"`
-	ObservedAt time.Time    `json:"observed_at"`
-	RawRef     RawWeightRef `json:"raw_ref"`
+	WeightKG int64 `json:"weight_kg"`
+	ObservedAt time.Time `json:"observed_at"`
+	RawRef RawWeightRef `json:"raw_ref"`
 }
 
-// DesiredOutputs keeps the historic Entry/Exit names for wire compatibility.
-// In the two-way physical workflow they mean fixed physical side A / side B:
-//   Entry* = SIDE A barrier/light
-//   Exit*  = SIDE B barrier/light
-// The engine maps logical ingress/egress to these sides from Transaction.Direction.
 type DesiredOutputs struct {
-	EntryGreen       bool `json:"entry_green"`
-	ExitGreen        bool `json:"exit_green"`
-	Buzzer           bool `json:"buzzer"`
+	EntryGreen bool `json:"entry_green"`
+	ExitGreen bool `json:"exit_green"`
+	Buzzer bool `json:"buzzer"`
 	EntryBarrierOpen bool `json:"entry_barrier_open"`
-	ExitBarrierOpen  bool `json:"exit_barrier_open"`
+	ExitBarrierOpen bool `json:"exit_barrier_open"`
 }
 
-// Transaction is a short-lived physical pass session. It is deliberately not
-// the long-lived business WeighCycle. A first pass may complete physically and
-// return this state machine to IDLE while its durable cycle remains QUEUED.
+// Transaction is one short physical pass. Business completion requires the
+// durable two-pass WeighCycle pair.
 type Transaction struct {
-	ID                  string                `json:"id"`
-	StationID           string                `json:"station_id"`
-	State               WorkflowState         `json:"state"`
-	Mode                Mode                  `json:"mode"`
-	Direction           Direction             `json:"direction"`
-	PassNumber           PassNumber            `json:"pass_number"`
-	CycleID              string                `json:"cycle_id,omitempty"`
-	CycleStatus          CycleStatus            `json:"cycle_status,omitempty"`
-	BusinessComplete     bool                  `json:"business_complete"`
-	StartedAt           time.Time              `json:"started_at"`
-	UpdatedAt           time.Time              `json:"updated_at"`
-	RFID                RFIDObservation        `json:"rfid"`
-	LPR                 LPRObservation         `json:"lpr"`
-	Identity            IdentityStatus         `json:"identity"`
-	IdentityReason      string                 `json:"identity_reason,omitempty"`
-	Position            PositionStatus         `json:"position"`
-	PositionSnapshot    PositionSnapshot       `json:"position_snapshot"`
-	LatestScale         *AuditedScaleReading   `json:"latest_scale,omitempty"`
-	AcceptedWeight      *WeightAcceptance      `json:"accepted_weight,omitempty"`
-	StableConfirmations int                    `json:"stable_confirmations"`
-	Faults              []Fault                `json:"faults,omitempty"`
-	Overrides           []Override             `json:"overrides,omitempty"`
-	TicketID            string                 `json:"ticket_id,omitempty"`
-	LocalCommittedAt    *time.Time             `json:"local_committed_at,omitempty"`
-	ExitSeen            bool                   `json:"exit_seen"`
-	CompletedAt         *time.Time             `json:"completed_at,omitempty"`
-	LastBlockReason     string                 `json:"last_block_reason,omitempty"`
-	Outputs             DesiredOutputs         `json:"outputs"`
+	ID string `json:"id"`
+	StationID string `json:"station_id"`
+	State WorkflowState `json:"state"`
+	Mode Mode `json:"mode"`
+	Direction Direction `json:"direction"`
+	PassNumber PassNumber `json:"pass_number"`
+	CycleID string `json:"cycle_id,omitempty"`
+	CycleStatus CycleStatus `json:"cycle_status,omitempty"`
+	BusinessComplete bool `json:"business_complete"`
+	GrossKG int64 `json:"gross_kg,omitempty"`
+	TareKG int64 `json:"tare_kg,omitempty"`
+	NetKG int64 `json:"net_kg,omitempty"`
+	PairElapsedSeconds int64 `json:"pair_elapsed_seconds,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	RFID RFIDObservation `json:"rfid"`
+	LPR LPRObservation `json:"lpr"`
+	CameraEvidence []CameraEvidence `json:"camera_evidence,omitempty"`
+	Identity IdentityStatus `json:"identity"`
+	IdentityReason string `json:"identity_reason,omitempty"`
+	Position PositionStatus `json:"position"`
+	PositionSnapshot PositionSnapshot `json:"position_snapshot"`
+	LatestScale *AuditedScaleReading `json:"latest_scale,omitempty"`
+	AcceptedWeight *WeightAcceptance `json:"accepted_weight,omitempty"`
+	StableConfirmations int `json:"stable_confirmations"`
+	Faults []Fault `json:"faults,omitempty"`
+	Overrides []Override `json:"overrides,omitempty"`
+	TicketID string `json:"ticket_id,omitempty"`
+	LocalCommittedAt *time.Time `json:"local_committed_at,omitempty"`
+	ExitSeen bool `json:"exit_seen"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	LastBlockReason string `json:"last_block_reason,omitempty"`
+	Outputs DesiredOutputs `json:"outputs"`
 }
