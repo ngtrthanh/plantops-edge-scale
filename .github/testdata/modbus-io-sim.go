@@ -17,17 +17,17 @@ type state struct {
 
 func main() {
 	s := &state{}
-	// Initial physical state: empty lane, barriers closed, safety circuit clear.
-	s.di[5] = true
-	s.di[7] = true
-	s.di[8] = true
+	// Initial physical state: empty lane, both barriers closed, safety clear.
+	s.di[5] = true // side A barrier CLOSED feedback
+	s.di[7] = true // side B barrier CLOSED feedback
+	s.di[8] = true // physical safety clear
 
 	ln, err := net.Listen("tcp", "127.0.0.1:19002")
 	if err != nil { log.Fatal(err) }
 	defer ln.Close()
-	log.Printf("Modbus I/O simulator listening on %s", ln.Addr())
+	log.Printf("two-pass Modbus I/O simulator listening on %s", ln.Addr())
 
-	go simulateTruck(s)
+	go simulateTwoPassTruck(s)
 	for {
 		conn, err := ln.Accept()
 		if err != nil { log.Fatal(err) }
@@ -35,27 +35,53 @@ func main() {
 	}
 }
 
-func simulateTruck(s *state) {
+func simulateTwoPassTruck(s *state) {
+	// PASS #1 A -> B.
 	time.Sleep(2 * time.Second)
-	setDI(s, 0, true) // ENTRY_PRESENT
-	log.Printf("truck: entry present")
+	setDI(s, 0, true) // physical side A approach / historic ENTRY_PRESENT
+	log.Printf("pass1 A->B: side A approach present")
 
-	waitFor(15*time.Second, func() bool { return coil(s,5) && coil(s,1) })
+	waitFor(20*time.Second, func() bool { return coil(s,5) && coil(s,1) }) // side A barrier request + green
 	time.Sleep(400*time.Millisecond)
 	setDI(s,0,false)
 	setDI(s,1,true)
 	setDI(s,2,true)
-	log.Printf("truck: fully positioned on deck")
+	log.Printf("pass1 A->B: fully positioned on deck")
 
-	waitFor(20*time.Second, func() bool { return coil(s,6) && coil(s,3) })
+	waitFor(20*time.Second, func() bool { return coil(s,6) && coil(s,3) }) // side B release
 	time.Sleep(400*time.Millisecond)
 	setDI(s,1,false)
 	setDI(s,2,false)
-	setDI(s,3,true)
-	log.Printf("truck: exit sensor active")
+	setDI(s,3,true) // physical side B exit sensor
+	log.Printf("pass1 A->B: exiting side B")
 	time.Sleep(700*time.Millisecond)
 	setDI(s,3,false)
-	log.Printf("truck: clear of exit")
+	log.Printf("pass1 A->B: lane clear; business cycle remains queued")
+
+	// Wait until the application has removed first-pass permissive outputs, then
+	// represent the same truck returning from physical side B. CI explicitly
+	// CALLs the queued cycle before this return is allowed through.
+	waitFor(10*time.Second, func() bool { return !coil(s,5) && !coil(s,6) && !coil(s,1) && !coil(s,3) })
+	time.Sleep(2*time.Second)
+	setDI(s,3,true) // physical side B approach for B -> A
+	log.Printf("pass2 B->A: side B approach present")
+
+	waitFor(25*time.Second, func() bool { return coil(s,6) && coil(s,3) }) // side B ingress after CALL + empty proof
+	time.Sleep(400*time.Millisecond)
+	setDI(s,3,false)
+	setDI(s,1,true)
+	setDI(s,2,true)
+	log.Printf("pass2 B->A: fully positioned on deck")
+
+	waitFor(25*time.Second, func() bool { return coil(s,5) && coil(s,1) }) // completed pair releases physical side A
+	time.Sleep(400*time.Millisecond)
+	setDI(s,1,false)
+	setDI(s,2,false)
+	setDI(s,0,true) // physical side A egress, mapped to logical exit
+	log.Printf("pass2 B->A: exiting side A")
+	time.Sleep(700*time.Millisecond)
+	setDI(s,0,false)
+	log.Printf("pass2 B->A: lane clear; paired cycle complete")
 }
 
 func waitFor(timeout time.Duration, fn func() bool) {
@@ -114,14 +140,10 @@ func process(pdu []byte, s *state) []byte {
 		if value!=0xFF00 && value!=0x0000 { return []byte{0x85,0x03} }
 		s.mu.Lock()
 		s.coils[addr]=on
-		// Barrier controller feedback: command is an OPEN request. Dropping it
-		// lets the simulated barrier controller close locally.
-		if addr==5 {
-			s.di[4]=on; s.di[5]=!on
-		}
-		if addr==6 {
-			s.di[6]=on; s.di[7]=!on
-		}
+		// Physical barrier feedback follows the fixed side command. Historic
+		// EntryBarrier==side A (coil 5 / DI 4,5); ExitBarrier==side B (coil 6 / DI 6,7).
+		if addr==5 { s.di[4]=on; s.di[5]=!on }
+		if addr==6 { s.di[6]=on; s.di[7]=!on }
 		s.mu.Unlock()
 		return append([]byte(nil),pdu...)
 	default:
