@@ -44,6 +44,7 @@ func (w *Workflow) ObservePosition(ctx context.Context, physical domain.Position
 }
 func (w *Workflow) ObserveRFID(ctx context.Context,o domain.RFIDObservation)error{if err:=w.Inner.ObserveRFID(ctx,o);err!=nil{return err};w.tryBindCalled(ctx);return nil}
 func (w *Workflow) ObserveLPR(ctx context.Context,o domain.LPRObservation)error{if err:=w.Inner.ObserveLPR(ctx,o);err!=nil{return err};w.tryBindCalled(ctx);return nil}
+func (w *Workflow) ObserveCamera(_ context.Context,e domain.CameraEvidence)error{if w.Bridge==nil{return errors.New("camera evidence bridge unavailable")};txID:=w.ActiveTransactionID();return w.Bridge.AddEvidence(txID,e)}
 func (w *Workflow) ObserveScale(ctx context.Context,a domain.AuditedScaleReading)error{return w.Inner.ObserveScale(ctx,a)}
 func (w *Workflow) ObserveFault(ctx context.Context,f domain.Fault)error{return w.Inner.ObserveFault(ctx,f)}
 func (w *Workflow) ClearFault(ctx context.Context,d domain.DeviceID)error{return w.Inner.ClearFault(ctx,d)}
@@ -57,21 +58,17 @@ func (w *Workflow) Snapshot() engine.Snapshot {
 	w.mu.RLock();direction:=w.direction;var bound *domain.WeighCycle;if w.bound!=nil{v:=*w.bound;bound=&v};w.mu.RUnlock()
 	if direction==""{direction=domain.DirectionAToB};tx.Direction=direction;if direction==domain.DirectionAToB{tx.PassNumber=domain.PassFirst}else{tx.PassNumber=domain.PassSecond}
 	if direction==domain.DirectionBToA{tx.PositionSnapshot=swapPhysicalPosition(tx.PositionSnapshot);tx.Outputs=swapPhysicalOutputs(tx.Outputs)}
+	if w.Bridge!=nil{tx.CameraEvidence=w.Bridge.Evidence(tx.ID)}
 	if bound!=nil{tx.CycleID=bound.ID;tx.CycleStatus=bound.Status;tx.GrossKG=bound.GrossKG;tx.TareKG=bound.TareKG;tx.NetKG=bound.NetKG;tx.PairElapsedSeconds=int64(bound.PairElapsed/1e9)}
 	if w.Bridge!=nil{
 		if out,ok:=w.Bridge.Outcome(tx.ID);ok{
 			tx.CycleID=out.Cycle.ID;tx.CycleStatus=out.Cycle.Status
 			if out.Direction==domain.DirectionAToB{tx.TicketID="";tx.BusinessComplete=false}
-			if out.Direction==domain.DirectionBToA&&out.FinalTicket.ID!=""{
-				tx.TicketID=out.FinalTicket.ID;tx.BusinessComplete=true;tx.CycleStatus=domain.CycleComplete
-				tx.GrossKG=out.Cycle.GrossKG;tx.TareKG=out.Cycle.TareKG;tx.NetKG=out.Cycle.NetKG;tx.PairElapsedSeconds=int64(out.Cycle.PairElapsed/1e9)
-			}
+			if out.Direction==domain.DirectionBToA&&out.FinalTicket.ID!=""{tx.TicketID=out.FinalTicket.ID;tx.BusinessComplete=true;tx.CycleStatus=domain.CycleComplete;tx.GrossKG=out.Cycle.GrossKG;tx.TareKG=out.Cycle.TareKG;tx.NetKG=out.Cycle.NetKG;tx.PairElapsedSeconds=int64(out.Cycle.PairElapsed/1e9)}
 			if out.Err!=""{tx.BusinessComplete=false;tx.LastBlockReason=out.Err}
 		}
 	}
-	if direction==domain.DirectionBToA&&tx.Identity==domain.IdentityAccepted&&bound==nil&&tx.State!=domain.StateFaultLockout&&tx.State!=domain.StateComplete{
-		tx.State=domain.StateQueueMismatch;tx.CycleStatus=domain.CycleUnpairedReturn;tx.BusinessComplete=false;tx.Outputs=domain.DesiredOutputs{};tx.LastBlockReason="B_TO_A return has no matching CALLED cycle; automatic entry blocked"
-	}
+	if direction==domain.DirectionBToA&&tx.Identity==domain.IdentityAccepted&&bound==nil&&tx.State!=domain.StateFaultLockout&&tx.State!=domain.StateComplete{tx.State=domain.StateQueueMismatch;tx.CycleStatus=domain.CycleUnpairedReturn;tx.BusinessComplete=false;tx.Outputs=domain.DesiredOutputs{};tx.LastBlockReason="B_TO_A return has no matching CALLED cycle; automatic entry blocked"}
 	s.Transaction=tx;s.State=tx.State;s.Mode=tx.Mode;return s
 }
 
@@ -81,4 +78,4 @@ func detectDirection(p domain.PositionSnapshot)domain.Direction{switch{case p.En
 func swapPhysicalPosition(p domain.PositionSnapshot)domain.PositionSnapshot{return domain.PositionSnapshot{EntryPresent:p.ExitPresent,FrontPresent:p.RearPresent,RearPresent:p.FrontPresent,ExitPresent:p.EntryPresent,EntryBarrierOpen:p.ExitBarrierOpen,EntryBarrierClosed:p.ExitBarrierClosed,ExitBarrierOpen:p.EntryBarrierOpen,ExitBarrierClosed:p.EntryBarrierClosed,SafetyClear:p.SafetyClear,Observed:p.Observed}}
 func swapPhysicalOutputs(v domain.DesiredOutputs)domain.DesiredOutputs{return domain.DesiredOutputs{EntryGreen:v.ExitGreen,ExitGreen:v.EntryGreen,Buzzer:v.Buzzer,EntryBarrierOpen:v.ExitBarrierOpen,ExitBarrierOpen:v.EntryBarrierOpen}}
 func allPresenceClear(p domain.PositionSnapshot)bool{return !p.EntryPresent&&!p.FrontPresent&&!p.RearPresent&&!p.ExitPresent}
-func cloneTx(in *domain.Transaction)*domain.Transaction{if in==nil{return nil};out:=*in;out.Faults=append([]domain.Fault(nil),in.Faults...);out.Overrides=append([]domain.Override(nil),in.Overrides...);if in.LatestScale!=nil{v:=*in.LatestScale;out.LatestScale=&v};if in.AcceptedWeight!=nil{v:=*in.AcceptedWeight;out.AcceptedWeight=&v};if in.LocalCommittedAt!=nil{v:=*in.LocalCommittedAt;out.LocalCommittedAt=&v};if in.CompletedAt!=nil{v:=*in.CompletedAt;out.CompletedAt=&v};return &out}
+func cloneTx(in *domain.Transaction)*domain.Transaction{if in==nil{return nil};out:=*in;out.Faults=append([]domain.Fault(nil),in.Faults...);out.Overrides=append([]domain.Override(nil),in.Overrides...);out.CameraEvidence=append([]domain.CameraEvidence(nil),in.CameraEvidence...);if in.LatestScale!=nil{v:=*in.LatestScale;out.LatestScale=&v};if in.AcceptedWeight!=nil{v:=*in.AcceptedWeight;out.AcceptedWeight=&v};if in.LocalCommittedAt!=nil{v:=*in.LocalCommittedAt;out.LocalCommittedAt=&v};if in.CompletedAt!=nil{v:=*in.CompletedAt;out.CompletedAt=&v};return &out}
