@@ -8,38 +8,45 @@ import (
 
 func main() {
 	ln, err := net.Listen("tcp", "127.0.0.1:19001")
-	if err != nil {
-		log.Fatal(err)
-	}
+	if err != nil { log.Fatal(err) }
 	defer ln.Close()
-	log.Printf("scale simulator listening on %s", ln.Addr())
+	log.Printf("two-pass scale simulator listening on %s", ln.Addr())
 
 	conn, err := ln.Accept()
-	if err != nil {
-		log.Fatal(err)
-	}
+	if err != nil { log.Fatal(err) }
 	defer conn.Close()
 
-	// First prove an empty, stable scale before entry authorization.
-	if _, err := conn.Write([]byte("WT=0;ST=1;OVERLOAD=0;FAULT=\r\n")); err != nil {
-		log.Fatal(err)
+	write := func(frame string) {
+		if _, err := conn.Write([]byte(frame)); err != nil { log.Fatal(err) }
+	}
+	settle := func(frames ...string) {
+		for _, frame := range frames { write(frame); time.Sleep(200*time.Millisecond) }
 	}
 
-	// Give CI enough time to inject entry/RFID/LPR/position events. Then behave
-	// like a truck loading the deck and settling to a final stable weight.
-	time.Sleep(5 * time.Second)
-	frames := []string{
+	// Empty/stable proof before PASS #1 A->B.
+	write("WT=0;ST=1;OVERLOAD=0;FAULT=\r\n")
+
+	// PASS #1 gross. CI has time to establish identity and position first.
+	time.Sleep(5*time.Second)
+	settle(
 		"WT=28300;ST=0;OVERLOAD=0;FAULT=\r\n",
 		"WT=28455;ST=1;OVERLOAD=0;FAULT=\r\n",
 		"WT=28460;ST=1;OVERLOAD=0;FAULT=\r\n",
-	}
-	for _, frame := range frames {
-		if _, err := conn.Write([]byte(frame)); err != nil {
-			log.Fatal(err)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	)
 
-	// Keep the connection alive so workflow/audit status remains inspectable.
-	time.Sleep(30 * time.Second)
+	// Truck has left for unloading; prove the deck empty again before the
+	// explicitly CALLED B->A return is permitted to enter.
+	time.Sleep(4*time.Second)
+	write("WT=0;ST=1;OVERLOAD=0;FAULT=\r\n")
+
+	// PASS #2 tare.
+	time.Sleep(5*time.Second)
+	settle(
+		"WT=11900;ST=0;OVERLOAD=0;FAULT=\r\n",
+		"WT=11825;ST=1;OVERLOAD=0;FAULT=\r\n",
+		"WT=11820;ST=1;OVERLOAD=0;FAULT=\r\n",
+	)
+
+	// Keep connection alive for audit/status assertions.
+	time.Sleep(30*time.Second)
 }
