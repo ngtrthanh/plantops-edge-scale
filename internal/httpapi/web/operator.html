@@ -7,62 +7,166 @@
 <link rel="stylesheet" href="/operator.css">
 </head>
 <body>
-<div class="app">
+<div class="app-shell">
   <header class="topbar">
-    <div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M3 16h18M5 16V8h14v8M8 8V5h8v3M7 20h10" stroke="#59d8ff" stroke-width="1.6" stroke-linecap="round"/></svg></div><div><b>PLANTOPS EDGE SCALE</b><small>TWO-PASS UNMANNED WEIGHBRIDGE · DIGITAL TWIN</small></div></div>
-    <div class="topmeta"><div class="pill"><i id="healthDot" class="dot"></i><span id="healthText">CONNECTING</span></div><div class="pill">STATION&nbsp;<b id="stationTop">EDGE-01</b></div><div class="pill">DB&nbsp;<b id="dbTop">—</b></div><div class="pill">SYNC&nbsp;<b id="syncTop">—</b></div></div>
-    <div class="actions"><button class="btn" id="liveBtn">LIVE</button><button class="btn demo" id="demoBtn">VISUAL DEMO</button></div>
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 28 28"><path d="M4 20h20M6 20V10h16v10M10 10V6h8v4M8 24h12"/></svg></div>
+      <div><strong>PLANTOPS EDGE SCALE</strong><small>TWO-PASS UNMANNED WEIGHBRIDGE · DIGITAL TWIN</small></div>
+    </div>
+    <div class="top-status">
+      <div class="status-pill"><i id="healthDot" class="status-dot"></i><span id="healthText">CONNECTING</span></div>
+      <div class="status-pill">STATION <b id="stationTop">EDGE-01</b></div>
+      <div class="status-pill">DB <b id="dbTop">—</b></div>
+      <div class="status-pill">SYNC <b id="syncTop">—</b></div>
+    </div>
+    <div class="top-actions"><button id="liveBtn" class="btn">LIVE</button><button id="demoBtn" class="btn demo">VISUAL DEMO</button></div>
   </header>
-  <main class="layout">
-    <section class="panel left">
-      <div class="panelhead"><h2>Physical Pass</h2><span id="txShort">NO ACTIVE PASS</span></div>
-      <div class="steps" id="steps"></div>
-      <div class="auditmini">
-        <div class="row"><span>Direction</span><b id="directionText">—</b></div>
-        <div class="row"><span>Pass</span><b id="passText">—</b></div>
-        <div class="row"><span>Cycle</span><b id="cycleText">—</b></div>
-        <div class="row"><span>Cycle status</span><b id="cycleStatus">—</b></div>
-        <div class="row"><span>Gross / Tare / Net</span><b id="pairText">—</b></div>
-        <div class="row"><span>Raw audit</span><b id="rawVerify">—</b></div><div class="row"><span>Event audit</span><b id="eventVerify">—</b></div><div class="row"><span>Runtime SHA</span><b id="shaMini">—</b></div>
-      </div>
-    </section>
-    <section class="panel center">
-      <div class="scenehead"><div class="state"><span id="stateBadge" class="statebadge">IDLE</span><span id="modeBadge" class="modebadge">NORMAL</span><span id="businessBadge" class="modebadge">WAITING</span></div><div class="truth">PHYSICAL PASS ≠ BUSINESS COMPLETE · PAIR REQUIRED</div></div>
-      <div class="scene" id="scene">
-        <div id="demoBanner" class="demoBanner">VISUAL DEMO · NO HARDWARE WRITES</div>
-        <div class="skyline"></div><div class="road"></div>
-        <div class="stationtag" id="stationScene">EDGE-01</div>
-        <div class="weightbox"><small>AUTHORITATIVE SCALE</small><div id="weight" class="weight">0 kg</div><small id="weightState">WAITING FOR LIVE FRAME</small></div>
-        <div id="scaleDeck" class="scale"></div>
-        <div id="entryBarrier" class="barrier entry"><div class="post"></div><div class="arm"></div><div id="entryLight" class="light"><i class="lamp"></i></div></div>
-        <div id="exitBarrier" class="barrier exit"><div class="post"></div><div class="arm"></div><div id="exitLight" class="light"><i class="lamp"></i></div></div>
-        <div id="rfid" class="rfid"><div class="mast"></div><div class="head"></div><div class="wave"></div><div class="wave"></div><div class="wave"></div></div>
 
-        <div id="camC1A" class="camera" style="left:23%;top:30%"><div class="pole"></div><div class="cam"><i class="lens"></i></div><span style="position:absolute;top:-15px;left:4px;font-size:8px;color:#91abb5">C1-A · A→B LPR</span></div>
-        <div id="camC1B" class="camera" style="left:76%;top:30%;transform:scaleX(-1)"><div class="pole"></div><div class="cam"><i class="lens"></i></div><span style="position:absolute;top:-15px;right:-4px;transform:scaleX(-1);font-size:8px;color:#91abb5;white-space:nowrap">C1-B · B→A LPR</span></div>
-        <div id="camC3" class="camera" style="left:54%;top:25%"><div class="pole"></div><div class="cam"><i class="lens"></i></div><span style="position:absolute;top:-15px;left:0;font-size:8px;color:#91abb5">C3 · OVERVIEW</span></div>
+  <main class="dashboard">
+    <aside class="panel left-panel">
+      <div class="panel-title"><div><small>TRANSACTION</small><h2 id="cycleTitle">NO ACTIVE CYCLE</h2></div><span id="cycleBadge" class="badge muted">WAITING</span></div>
+      <div class="facts">
+        <div><span>Vehicle</span><b id="vehicleText">—</b></div>
+        <div><span>RFID</span><b id="rfidText">—</b></div>
+        <div><span>Direction</span><b id="directionText">—</b></div>
+        <div><span>Physical pass</span><b id="passText">—</b></div>
+      </div>
 
-        <div id="sEntry" class="sensor s-entry"><span>SIDE A</span></div><div id="sFront" class="sensor s-front"><span>FRONT</span></div><div id="sRear" class="sensor s-rear"><span>REAR</span></div><div id="sExit" class="sensor s-exit"><span>SIDE B</span></div>
-        <div id="truck" class="truck"><div class="truckbody"></div><div class="cab"></div><div class="wind"></div><div class="cargo"></div><div id="plateTruck" class="plate">—</div><div class="wheel w1"></div><div class="wheel w2"></div></div>
-        <div class="idtag">RFID <b id="rfidText">—</b>&nbsp; · &nbsp;PLATE <b id="plateText">—</b>&nbsp; · &nbsp;POSITION <b id="positionText">—</b>&nbsp; · &nbsp;NET <b id="netText">—</b></div>
+      <div class="section-head"><b>BUSINESS CYCLE</b><span id="cycleClock">—</span></div>
+      <div id="cycleTimeline" class="cycle-timeline"></div>
+
+      <div class="section-head"><b>EVIDENCE</b><span>LIVE REFERENCES</span></div>
+      <div class="evidence-grid">
+        <div id="evC1A" class="evidence-card"><div class="ev-icon camera-icon"></div><b>C1A</b><small>A-side LPR</small><span id="evC1AText">WAITING</span></div>
+        <div id="evC3" class="evidence-card"><div class="ev-icon overview-icon"></div><b>C3</b><small>Overview</small><span id="evC3Text">WAITING</span></div>
+        <div id="evC1B" class="evidence-card"><div class="ev-icon camera-icon flip"></div><b>C1B</b><small>B-side LPR</small><span id="evC1BText">WAITING</span></div>
       </div>
-      <div class="chartwrap"><div class="charthead"><b>RAW WEIGHT CURVE · ALL FRAMES</b><span id="chartMeta">last 120 audited frames</span></div><svg id="chart" class="chart" viewBox="0 0 1000 120" preserveAspectRatio="none"><line class="chartzero" x1="0" y1="110" x2="1000" y2="110"></line><path id="chartLine" class="chartline"></path><path id="chartStable" class="chartstable"></path><circle id="chartDot" class="chartdot" r="4" cx="0" cy="110"></circle></svg></div>
+
+      <div class="audit-compact">
+        <div><span>Raw audit</span><b id="rawVerify">—</b></div>
+        <div><span>Event audit</span><b id="eventVerify">—</b></div>
+        <div><span>Runtime SHA</span><b id="shaMini">—</b></div>
+      </div>
+    </aside>
+
+    <section class="panel main-panel">
+      <div id="businessStrip" class="business-strip">
+        <div class="journey-step" data-journey="INBOUND"><i class="step-num">1</i><div><b>LOADED INBOUND</b><small>FULL TRUCK · SIDE A</small></div></div>
+        <i class="journey-arrow">›</i>
+        <div class="journey-step" data-journey="PASS1"><i class="step-num">2</i><div><b>PASS 1</b><small>GROSS WEIGHT</small></div></div>
+        <i class="journey-arrow">›</i>
+        <div class="journey-step" data-journey="UNLOAD"><i class="step-num">3</i><div><b>UNLOAD</b><small>WAREHOUSE / STOCKPILE</small></div></div>
+        <i class="journey-arrow">›</i>
+        <div class="journey-step" data-journey="RETURN"><i class="step-num">4</i><div><b>EMPTY RETURN</b><small>SIDE B → A</small></div></div>
+        <i class="journey-arrow">›</i>
+        <div class="journey-step" data-journey="PASS2"><i class="step-num">5</i><div><b>PASS 2</b><small>TARE WEIGHT</small></div></div>
+        <i class="journey-arrow">›</i>
+        <div class="journey-step" data-journey="COMPLETE"><i class="step-num">6</i><div><b>COMPLETE</b><small>NET CALCULATED</small></div></div>
+      </div>
+
+      <div class="scene-head">
+        <div><span id="physicalBadge" class="badge info">IDLE</span><span id="businessBadge" class="badge muted">WAITING</span></div>
+        <div class="scene-head-right"><span>ACTIVE CAMERA</span><b id="activeCamera">—</b><span id="demoBanner" class="demo-chip">VISUAL DEMO · NO HARDWARE WRITES</span></div>
+      </div>
+
+      <div id="siteScene" class="site-scene" data-stage="INBOUND">
+        <svg class="route-layer" viewBox="0 0 1000 540" preserveAspectRatio="none" aria-hidden="true">
+          <path id="routeOutbound" class="route route-outbound" d="M60 390 C220 390 280 390 430 390 C530 390 585 320 610 235 C625 185 665 155 760 155"/>
+          <path id="routeReturn" class="route route-return" d="M760 175 C665 175 635 215 615 265 C580 350 540 390 430 390 C275 390 205 390 60 390"/>
+        </svg>
+
+        <div class="scene-label side-a-label">SIDE A · INBOUND</div>
+        <div class="scene-label side-b-label">SIDE B · RETURN</div>
+        <div class="warehouse-zone">
+          <div class="warehouse-roof"></div><div class="warehouse-body"><span>WAREHOUSE / STOCKPILE</span><div class="warehouse-door"></div></div>
+          <svg class="stockpile" viewBox="0 0 180 90" aria-hidden="true"><path d="M5 80 Q32 49 55 58 Q78 20 105 45 Q132 23 175 80Z"/><path class="stock-hi" d="M28 76 Q54 51 72 59 M79 52 Q105 34 126 54 M111 61 Q135 45 154 66"/></svg>
+          <div id="dumpCloud" class="dump-cloud"><i></i><i></i><i></i><i></i></div>
+        </div>
+
+        <div class="weigh-area">
+          <div id="scaleDeck" class="scale-deck"><span>WEIGH DECK</span><i class="deck-glow"></i></div>
+          <div id="barrierA" class="barrier barrier-a"><i class="barrier-post"></i><i class="barrier-arm"></i><span class="signal"><em></em></span></div>
+          <div id="barrierB" class="barrier barrier-b"><i class="barrier-post"></i><i class="barrier-arm"></i><span class="signal"><em></em></span></div>
+          <div class="sensor sensor-a" id="sEntry"><i></i><span>A</span></div>
+          <div class="sensor sensor-front" id="sFront"><i></i><span>FRONT</span></div>
+          <div class="sensor sensor-rear" id="sRear"><i></i><span>REAR</span></div>
+          <div class="sensor sensor-b" id="sExit"><i></i><span>B</span></div>
+        </div>
+
+        <div id="camC1A" class="site-camera c1a"><span>C1A</span><i class="cam-head"></i><i class="cam-pole"></i><i class="cam-beam"></i></div>
+        <div id="camC1B" class="site-camera c1b"><span>C1B</span><i class="cam-head"></i><i class="cam-pole"></i><i class="cam-beam"></i></div>
+        <div id="camC3" class="site-camera c3"><span>C3 OVERVIEW</span><i class="cam-head"></i><i class="cam-pole"></i><i class="cam-beam"></i></div>
+
+        <div class="rfid-reader rfid-a"><i></i><span>RFID A</span></div><div class="rfid-reader rfid-b"><i></i><span>RFID B</span></div>
+
+        <div id="weightDisplay" class="weight-display"><small>AUTHORITATIVE SCALE</small><strong id="weight">0 kg</strong><span id="weightState">WAITING FOR LIVE FRAME</span></div>
+
+        <div id="truck" class="truck-wrap loaded" aria-label="Animated dump truck">
+          <svg class="truck-svg" viewBox="0 0 300 150" role="img" aria-label="Industrial dump truck">
+            <defs>
+              <linearGradient id="cabPaint" x1="0" x2="1"><stop offset="0" stop-color="#d9e7eb"/><stop offset="1" stop-color="#8fa9b4"/></linearGradient>
+              <linearGradient id="bedPaint" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#51636c"/><stop offset="1" stop-color="#263740"/></linearGradient>
+            </defs>
+            <g class="truck-shadow"><ellipse cx="154" cy="126" rx="127" ry="10"/></g>
+            <g class="truck-chassis"><rect x="35" y="103" width="226" height="13" rx="4"/><rect x="106" y="91" width="124" height="12" rx="3"/></g>
+            <g class="truck-cab">
+              <path d="M36 103V62q0-10 10-10h51l22 24v27z" fill="url(#cabPaint)" stroke="#b8cbd2" stroke-width="2"/>
+              <path d="M52 58h39l18 20H49z" class="truck-window"/>
+              <rect x="49" y="84" width="20" height="10" rx="2" class="truck-grille"/>
+              <rect x="40" y="97" width="20" height="6" rx="2" class="truck-bumper"/>
+              <circle cx="43" cy="80" r="3" class="truck-light"/>
+            </g>
+            <g class="dump-bed" id="dumpBed">
+              <path d="M113 43h140l-15 59H124z" fill="url(#bedPaint)" stroke="#72868f" stroke-width="2"/>
+              <path d="M126 49h113M124 63h111M121 77h111M118 91h111" class="bed-ribs"/>
+              <path d="M119 44l4 57M145 44l-1 58M173 44l-6 58M202 44l-10 58M232 44l-15 58" class="bed-ribs"/>
+              <g class="cargo-load" id="truckCargo">
+                <path d="M125 48 Q141 26 160 42 Q177 20 195 41 Q214 25 237 48Z"/>
+                <circle cx="145" cy="42" r="7"/><circle cx="177" cy="35" r="8"/><circle cx="207" cy="40" r="7"/><circle cx="226" cy="43" r="5"/>
+              </g>
+            </g>
+            <g class="hydraulic"><path d="M145 103l28-38"/><path d="M151 102l26-34"/></g>
+            <g class="wheel wheel-front"><circle cx="76" cy="116" r="24"/><circle cx="76" cy="116" r="11"/><circle cx="76" cy="116" r="3"/></g>
+            <g class="wheel wheel-mid"><circle cx="185" cy="116" r="24"/><circle cx="185" cy="116" r="11"/><circle cx="185" cy="116" r="3"/></g>
+            <g class="wheel wheel-rear"><circle cx="233" cy="116" r="24"/><circle cx="233" cy="116" r="11"/><circle cx="233" cy="116" r="3"/></g>
+            <g class="truck-plate"><rect x="42" y="106" width="42" height="12" rx="2"/><text id="plateTruck" x="63" y="115" text-anchor="middle">—</text></g>
+          </svg>
+          <div id="cargoParticles" class="cargo-particles"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+
+        <div class="scene-note" id="sceneNote"><b>LOADED INBOUND</b><span>Truck enters from Side A with material.</span></div>
+      </div>
+
+      <div class="weight-equation">
+        <div class="weight-card gross"><small>PASS 1 · GROSS</small><strong id="grossText">— kg</strong><span>A → B · loaded truck</span></div>
+        <i>−</i>
+        <div class="weight-card tare"><small>PASS 2 · TARE</small><strong id="tareText">— kg</strong><span>B → A · empty truck</span></div>
+        <i>=</i>
+        <div class="weight-card net"><small>NET MATERIAL</small><strong id="netText">— kg</strong><span id="netState">waiting for valid pair</span></div>
+      </div>
+
+      <div class="chart-wrap"><div class="chart-head"><b>RAW WEIGHT CURVE · ALL AUDITED FRAMES</b><span id="chartMeta">last 120 frames</span></div><svg id="chart" viewBox="0 0 1000 120" preserveAspectRatio="none"><line class="chart-zero" x1="0" y1="108" x2="1000" y2="108"/><path id="chartLine" class="chart-line"/><path id="chartStable" class="chart-stable"/><circle id="chartDot" class="chart-dot" r="4" cx="0" cy="108"/></svg></div>
     </section>
-    <section class="panel right">
-      <div class="panelhead"><h2>Hardware · Queue · Audit</h2><span id="clock">—</span></div>
-      <div class="devices">
-        <div class="device"><div class="dtop"><b>SCALE</b><i id="sigScale" class="sig"></i></div><small id="devScale">DISABLED</small></div>
-        <div class="device"><div class="dtop"><b>REMOTE I/O</b><i id="sigIO" class="sig"></i></div><small id="devIO">DISABLED</small></div>
-        <div class="device"><div class="dtop"><b>RFID</b><i id="sigRFID" class="sig"></i></div><small id="devRFID">WAITING</small></div>
-        <div class="device"><div class="dtop"><b>CAMERAS</b><i id="sigLPR" class="sig"></i></div><small id="devLPR">C1A · C1B · C3</small></div>
+
+    <aside class="panel right-panel">
+      <div class="panel-title"><div><small>EDGE RUNTIME</small><h2>HARDWARE & QUEUE</h2></div><span id="clock" class="mono">—</span></div>
+      <div class="health-grid">
+        <div class="health-item"><i id="sigScale"></i><div><b>SCALE</b><small id="devScale">DISABLED</small></div></div>
+        <div class="health-item"><i id="sigIO"></i><div><b>REMOTE I/O</b><small id="devIO">DISABLED</small></div></div>
+        <div class="health-item"><i id="sigRFID"></i><div><b>RFID</b><small id="devRFID">WAITING</small></div></div>
+        <div class="health-item"><i id="sigLPR"></i><div><b>CAMERAS</b><small id="devLPR">C1A · C1B · C3</small></div></div>
       </div>
-      <div class="metricgrid"><div class="metric"><label>Queued</label><strong id="queued">0</strong></div><div class="metric"><label>Called</label><strong id="called">0</strong></div><div class="metric"><label>Completed</label><strong id="completed">0</strong></div><div class="metric"><label>Pending Sync</label><strong id="pending">0</strong></div></div>
-      <div style="display:grid;grid-template-rows:auto minmax(100px,42%) minmax(0,1fr);min-height:0;border-top:1px solid #18303b">
-        <div class="panelhead" style="height:34px;border-bottom:1px solid #18303b"><h2>ACTIVE WEIGH QUEUE</h2><span>CALL exact truck only</span></div>
-        <div class="timeline" id="queueList"><div class="empty">No queued first-pass vehicles</div></div>
-        <div class="timeline" id="timeline"><div class="empty">Waiting for operational audit events…</div></div>
+
+      <div class="metric-grid">
+        <div><small>QUEUED</small><b id="queued">0</b></div><div><small>CALLED</small><b id="called">0</b></div><div><small>COMPLETED</small><b id="completed">0</b></div><div><small>PENDING SYNC</small><b id="pending">0</b></div>
       </div>
-    </section>
+
+      <div class="section-head"><b>ACTIVE WEIGH QUEUE</b><span>CALL EXACT TRUCK</span></div>
+      <div id="queueList" class="queue-list"><div class="empty">No queued first-pass vehicles</div></div>
+
+      <div class="section-head"><b>OPERATIONAL AUDIT</b><span>HASH CHAIN</span></div>
+      <div id="timeline" class="event-list"><div class="empty">Waiting for operational audit events…</div></div>
+    </aside>
   </main>
 </div>
 <div id="toast" class="toast"></div>
